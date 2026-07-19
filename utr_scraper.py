@@ -2,6 +2,7 @@ import re
 import json
 import logging
 import requests
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 from config import HEADLESS, UTR_USER, UTR_PASS
 from db import save_utr_cache
