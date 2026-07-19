@@ -177,38 +177,41 @@ class USTAScraper:
                 wtn_s, wtn_d = None, None
                 rank = None
                 
-                # Let's walk up parent elements to find structured data
+                # Walk up parent elements (max 2 levels to stay within the player's own container)
                 parent = link
-                for _ in range(5):
+                for _ in range(2):
                     parent = parent.parent
                     if not parent:
                         break
                     
                     text_content = parent.get_text()
                     
-                    # 1. Match City, ST (e.g., "Austin, TX" or "Miami, FL")
-                    location_match = re.search(r"\b([A-Za-z\s]+),\s*([A-Z]{2})\b", text_content)
-                    if location_match:
-                        city = location_match.group(1).strip()
-                        state = location_match.group(2).strip()
+                    # 1. Match City, ST (only if not already found in a closer parent)
+                    if city is None:
+                        location_match = re.search(r"[\n\r]?\s*([A-Za-z][A-Za-z .]*),\s*([A-Z]{2})\b", text_content)
+                        if location_match:
+                            city = location_match.group(1).strip()
+                            state = location_match.group(2).strip()
                     
                     # 2. Match WTN (e.g. WTN 16.4 or Singles WTN: 12.3)
-                    wtn_matches = re.findall(r"(?:wtn|world tennis number)\s*:?\s*(\d+\.?\d*)", text_content, re.IGNORECASE)
-                    if wtn_matches:
-                        try:
-                            wtn_s = float(wtn_matches[0])
-                            if len(wtn_matches) > 1:
-                                wtn_d = float(wtn_matches[1])
-                        except ValueError:
-                            pass
+                    if wtn_s is None:
+                        wtn_matches = re.findall(r"(?:wtn|world tennis number)\s*:?\s*(\d+\.?\d*)", text_content, re.IGNORECASE)
+                        if wtn_matches:
+                            try:
+                                wtn_s = float(wtn_matches[0])
+                                if len(wtn_matches) > 1:
+                                    wtn_d = float(wtn_matches[1])
+                            except ValueError:
+                                pass
                     
                     # 3. Match ranking (e.g. Rank: 42 or Ranking: #42)
-                    rank_match = re.search(r"(?:rank|ranking|#)\s*:?\s*#?(\d+)", text_content, re.IGNORECASE)
-                    if rank_match:
-                        try:
-                            rank = int(rank_match.group(1))
-                        except ValueError:
-                            pass
+                    if rank is None:
+                        rank_match = re.search(r"(?:rank|ranking|#)\s*:?\s*#?(\d+)", text_content, re.IGNORECASE)
+                        if rank_match:
+                            try:
+                                rank = int(rank_match.group(1))
+                            except ValueError:
+                                pass
                 
                 # Deduplicate and store
                 if usta_id not in players:
