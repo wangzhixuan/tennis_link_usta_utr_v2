@@ -1,9 +1,31 @@
+# Python
 venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# Secrets
 .env
+
+# Data & caches — tournament reports, SQLite DBs, golden mapping (never commit)
+data/
 *.db
+*.sqlite
 *.xlsx
+
+# Batch-fetch / scraping artifacts
+*.log
+*.pid
+usta_graphql_participants.json
+
+# Golden USTA->UTR mapping data (personal/proprietary)
+*mapping*.csv
+
+# Error screenshots
 usta_error_screenshot.png
 utr_error_screenshot.png
 utr_login_fail.png
+
+# Editor/OS
+.DS_Store
+Thumbs.db

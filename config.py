@@ -18,6 +18,28 @@ UTR_PASS = os.getenv("UTR_PASS", "")
 # DB Config
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "tennislink.db"))
 
+# Playwright persistent browser profile (stores USTA/UTR login cookies).
+# Override with PLAYWRIGHT_USER_DIR in .env. On a brand-new machine this
+# falls back to ~/.tennislink/playwright_profile; it keeps the legacy path
+# if that still exists so existing logins keep working.
+def _resolve_playwright_dir() -> str:
+    env = os.getenv("PLAYWRIGHT_USER_DIR")
+    if env:
+        return env
+    legacy = Path(r"C:\Users\cicic\AppData\Local\Temp\opencode\playwright_profile")
+    if legacy.exists():
+        return str(legacy)
+    return str(Path.home() / ".tennislink" / "playwright_profile")
+
+PLAYWRIGHT_USER_DIR = _resolve_playwright_dir()
+
+# Golden USTA->UTR mapping CSV, used by batch_fetch.py and the matcher's
+# cross-reference heuristic. Override with GOLDEN_MAPPING_PATH in .env.
+GOLDEN_MAPPING_PATH = os.getenv(
+    "GOLDEN_MAPPING_PATH",
+    str(BASE_DIR.parent / "Tennis" / "data" / "usta_to_utr_id_mapping.csv"),
+)
+
 # Browser settings
 HEADLESS = os.getenv("HEADLESS", "true").lower() in ("true", "1", "yes")
 

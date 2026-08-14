@@ -1,75 +1,117 @@
+import re
+import os
+import csv
 import difflib
 import logging
+from typing import Optional
+from config import GOLDEN_MAPPING_PATH
 from db import get_mapping, save_mapping, save_utr_cache
 from utr_scraper import UTRScraper
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+STATE_ABBREV = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+    "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+    "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+    "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+    "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
+    "wisconsin": "WI", "wyoming": "WY"
+}
+
+NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+
 class PlayerMatcher:
     def __init__(self, utr_scraper: UTRScraper):
         self.utr_scraper = utr_scraper
 
+    @staticmethod
+    def load_golden_mapping() -> tuple[dict, dict]:
+        """Load golden mapping CSV into lookup dicts: utr_by_usta and usta_by_utr."""
+        utr_by_usta = {}
+        usta_by_utr = {}
+        path = GOLDEN_MAPPING_PATH
+        if not os.path.exists(path):
+            logger.debug(f"Golden mapping file not found: {path}")
+            return utr_by_usta, usta_by_utr
+        try:
+            with open(path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    usta_id = row.get("usta_id", "").strip()
+                    utr_id = row.get("utr_id", "").strip()
+                    if usta_id and utr_id:
+                        utr_by_usta[usta_id] = utr_id
+                        usta_by_utr[utr_id] = usta_id
+            logger.info(f"Loaded {len(utr_by_usta)} golden mappings.")
+        except Exception as e:
+            logger.warning(f"Failed to load golden mapping: {e}")
+        return utr_by_usta, usta_by_utr
+
+    @staticmethod
+    def _abbrev_state(state: str) -> str:
+        s = state.strip().lower()
+        if len(s) == 2:
+            return s.upper()
+        return STATE_ABBREV.get(s, s.upper())
+
     def normalize_name(self, name: str) -> str:
-        """
-        Normalizes a name for comparison by converting to lowercase,
-        removing punctuation/middle initials, and stripping extra space.
-        """
         if not name:
             return ""
-        name = name.lower()
-        # Remove middle initials/names if they are formatted like "First M. Last"
+        name = re.sub(r"[.,;:!?'\"]+", "", name).lower().strip()
         parts = name.split()
-        if len(parts) > 2:
-            # If the middle part is a single letter (with or without dot), remove it
-            if len(parts[1]) <= 2 or parts[1].endswith("."):
-                parts.pop(1)
+        parts = [p for p in parts if p not in NAME_SUFFIXES]
+        if len(parts) > 2 and (len(parts[1]) <= 2 or parts[1].endswith(".")):
+            parts.pop(1)
         return " ".join(parts).strip()
 
     def name_similarity(self, name1: str, name2: str) -> float:
-        """
-        Calculates similarity ratio between two names.
-        """
         n1 = self.normalize_name(name1)
         n2 = self.normalize_name(name2)
-        return difflib.SequenceMatcher(None, n1, n2).ratio()
+        score = difflib.SequenceMatcher(None, n1, n2).ratio()
+        # Also try reversed word order (handles "Last First" vs "First Last")
+        parts = n1.split()
+        if len(parts) == 2:
+            rev = f"{parts[1]} {parts[0]}"
+            score = max(score, difflib.SequenceMatcher(None, rev, n2).ratio())
+        return score
 
     def location_score(self, city1, state1, city2, state2) -> float:
-        """
-        Returns a score from 0.0 to 1.0 representing location matching.
-        """
         if not state1 or not state2:
-            return 0.5  # Neutral if one is missing
-        
-        s1 = state1.strip().upper()
-        s2 = state2.strip().upper()
-        
-        # State abbreviation mapping helper
-        # Sometimes UTR lists Full State, sometimes abbreviation. Let's do a simple substring check or exact check.
-        state_match = (s1 == s2) or (s1 in s2) or (s2 in s1)
-        
+            return 0.5
+
+        s1 = self._abbrev_state(state1)
+        s2 = self._abbrev_state(state2)
+        state_match = s1 == s2
+
         if not state_match:
-            # Different states - lower confidence unless cities are empty
             return 0.1 if city1 or city2 else 0.3
-            
+
         if not city1 or not city2:
-            # Same state, but city is missing
             return 0.8
-            
+
         c1 = city1.strip().lower()
         c2 = city2.strip().lower()
-        
+
         if c1 == c2:
             return 1.0
-            
-        # Check for partial match/nicknames (e.g. "St. Petersburg" vs "Saint Petersburg")
+
         city_sim = difflib.SequenceMatcher(None, c1, c2).ratio()
         if city_sim > 0.8:
             return 0.95
-        
-        return 0.75  # Same state, different cities
 
-    def find_utr_profile(self, usta_player: dict, tournament_players: list = None) -> dict:
+        return 0.75
+
+    def find_utr_profile(self, usta_player: dict, tournament_players: list = None, no_cross_ref: bool = False) -> dict:
         """
         Finds the matching UTR profile for a given USTA player dict.
         
@@ -95,14 +137,14 @@ class PlayerMatcher:
             }
 
         # Level 2: Search UTR and Apply Name & Location matching
-        candidates = self.utr_scraper.search_players(usta_name)
+        candidates = self.utr_scraper.search_players(usta_name, city=hometown_city, state=hometown_state)
         if not candidates:
             # Try a broader search by splitting name if we have middle name/hyphen
             parts = usta_name.split()
             if len(parts) > 2:
                 broad_name = f"{parts[0]} {parts[-1]}"
                 logger.info(f"No exact name results. Trying broad search for: {broad_name}")
-                candidates = self.utr_scraper.search_players(broad_name)
+                candidates = self.utr_scraper.search_players(broad_name, city=hometown_city, state=hometown_state)
         
         if not candidates:
             logger.warning(f"No UTR candidates found for player: {usta_name}")
@@ -112,7 +154,7 @@ class PlayerMatcher:
         for cand in candidates:
             # 1. Name match score
             name_sim = self.name_similarity(usta_name, cand["name"])
-            if name_sim < 0.7:
+            if name_sim < 0.6:
                 # Name is too different, skip this candidate
                 continue
                 
@@ -138,10 +180,16 @@ class PlayerMatcher:
 
         # Level 3: Tournament Circle Heuristic (Deep Match History Verification)
         # Only run if we have candidates and have tournament_players to compare against
-        if len(scored_candidates) > 1 or (scored_candidates and scored_candidates[0]["confidence"] < 0.9):
+        if no_cross_ref:
+            logger.info(f"Skipping cross-reference matching for {usta_name} (--no-cross-ref)")
+        elif len(scored_candidates) > 1 or (scored_candidates and scored_candidates[0]["confidence"] < 0.9):
             if tournament_players:
-                # Compile other players' names in the tournament for comparison
-                other_player_names = {self.normalize_name(p["name"]) for p in tournament_players if p["usta_id"] != usta_id}
+                # Compile other players' names and USTA IDs in the tournament
+                other_names = {self.normalize_name(p["name"]) for p in tournament_players if p["usta_id"] != usta_id}
+                other_usta_ids = {p["usta_id"] for p in tournament_players if p["usta_id"] != usta_id}
+                
+                # Load golden mapping for known UTR_ID -> USTA_ID cross-reference
+                utr_by_usta, usta_by_utr = self.load_golden_mapping()
                 
                 logger.info(f"Running Match History Circle heuristic for {usta_name} against {len(scored_candidates)} candidates...")
                 for item in scored_candidates:
@@ -149,18 +197,35 @@ class PlayerMatcher:
                     matches = self.utr_scraper.get_player_matches(cand["utr_id"])
                     
                     circle_matches = 0
+                    cross_ref_matches = 0
+                    
                     for m in matches:
                         m_opp_normalized = self.normalize_name(m["opponent_name"])
-                        # If this opponent is in the list of tournament players, it's a huge circle match signal!
-                        if m_opp_normalized in other_player_names:
+                        opp_utr_id = m.get("opponent_utr_id")
+                        
+                        # Method A: Opponent name matches a tournament participant
+                        if m_opp_normalized in other_names:
                             circle_matches += 1
-                            logger.info(f"Circle MATCH! {usta_name}'s UTR candidate {cand['name']} (ID {cand['utr_id']}) played tournament participant '{m['opponent_name']}'")
+                            logger.info(f"Circle match: {usta_name}'s candidate {cand['name']} played '{m['opponent_name']}' (in tournament)")
+                        
+                        # Method B: Opponent UTR ID is in golden mapping -> known USTA ID
+                        # Check if that USTA ID is also in this tournament
+                        if opp_utr_id and opp_utr_id in usta_by_utr:
+                            known_usta_id = usta_by_utr[opp_utr_id]
+                            if known_usta_id in other_usta_ids:
+                                cross_ref_matches += 1
+                                logger.info(f"Cross-ref MATCH! Opponent UTR {opp_utr_id} (USTA {known_usta_id}) is in same tournament!")
                     
+                    total_boost = 0
                     if circle_matches > 0:
-                        # Massive boost to confidence
-                        item["confidence"] = min(0.99, item["confidence"] + 0.35 + (0.05 * circle_matches))
+                        total_boost += 0.35 + (0.05 * circle_matches)
+                    if cross_ref_matches > 0:
+                        total_boost += 0.40 + (0.05 * cross_ref_matches)
+                    
+                    if total_boost > 0:
+                        item["confidence"] = min(0.99, item["confidence"] + total_boost)
                         item["match_method"] = "match_history_circle"
-                        logger.info(f"Boosted confidence to {item['confidence']:.2f} for {cand['name']}")
+                        logger.info(f"Boosted confidence to {item['confidence']:.2f} for {cand['name']} (circle={circle_matches}, xref={cross_ref_matches})")
 
         # Sort candidates by confidence score descending
         scored_candidates.sort(key=lambda x: x["confidence"], reverse=True)

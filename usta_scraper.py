@@ -1,339 +1,522 @@
 import re
 import json
 import logging
-from bs4 import BeautifulSoup
+import requests
+from typing import Optional
 from playwright.sync_api import sync_playwright
-from config import HEADLESS
-from db import save_usta_cache
+from db import save_usta_player_profile
+from utr_scraper import PLAYWRIGHT_USER_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+PARTICIPANT_ENDPOINT = "https://prd-usta-kube-tournamentdesk-public-api.clubspark.pro/"
+TOURNAMENT_ENDPOINT = "https://prd-usta-kube-tournaments.clubspark.pro/"
+PROFILE_URL = "https://www.usta.com/en/home/play/player-search/profile.html#?uaid={usta_id}"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Origin": "https://playtennis.usta.com",
+    "Referer": "https://playtennis.usta.com/",
+    "Content-Type": "application/json"
+}
+
+VENUE_GET_PLAYERS_QUERY = """
+query GetPlayers($id: UUID!, $queryParameters: QueryParametersPaged!) {
+  paginatedPublicTournamentRegistrations(
+    tournamentId: $id
+    queryParameters: $queryParameters
+  ) {
+    totalItems
+    items {
+      firstName: playerFirstName
+      gender: playerGender
+      lastName: playerLastName
+      city: playerCity
+      state: playerState
+      playerName
+      playerId { key value }
+      playerCustomIds { key value }
+      events {
+        id
+        division {
+          gender
+          ageCategory { todsCode maximumAge type }
+          eventType
+          familyType
+        }
+      }
+    }
+  }
+}
+"""
+
+PARTICIPANT_QUERY = """
+query getTournamentParticipants($tournamentId: ID!) {
+  getTournamentParticipants(tournamentId: $tournamentId) {
+    participantId
+    participantName
+    participantRole
+    participantStatus
+    person {
+      addresses { city state }
+      personId
+      personOtherIds { personId uniqueOrganisationName }
+      standardGivenName
+      standardFamilyName
+    }
+    events { eventId entryStage }
+  }
+}
+"""
+
+TOURNAMENT_QUERY = """
+query GetTournament($id: UUID!, $previewMode: Boolean) {
+  publishedTournament(id: $id, previewMode: $previewMode) {
+    id
+    name
+    identificationCode
+    timings { startDate endDate }
+    publishedEvents(previewMode: $previewMode) {
+      id
+      division {
+        ageCategory { type minimumAge maximumAge }
+        eventType
+        gender
+        ratingCategory { ratingCategoryType ratingType value }
+      }
+      formatConfiguration { drawSize eventFormat }
+    }
+  }
+}
+"""
+
+
 class USTAScraper:
-    def __init__(self, headless=HEADLESS):
-        self.headless = headless
+    def __init__(self):
+        self.session = requests.Session()
 
-    def scrape_tournament(self, url_or_id: str, target_division: str = None):
-        """
-        Scrapes a USTA tournament page for players in a target division.
-        Supports full URLs or tournament IDs (TIDs).
-        """
-        url = url_or_id
-        if not url.startswith("http"):
-            # Assume it's a tournament ID (TID)
-            # USTA tournament URLs can be formatted as:
-            url = f"https://playtennis.usta.com/competitions/tournament/{url_or_id}/players"
-        elif not url.endswith("/players") and "players" not in url:
-            # Ensure we are going to the players tab if possible
-            if "/overview" in url:
-                url = url.replace("/overview", "/players")
-            elif "/draws" in url:
-                url = url.replace("/draws", "/players")
-            else:
-                # Append players if it's a standard competition url
-                url = url.rstrip("/") + "/players"
+    @staticmethod
+    def extract_guid(url_or_id: str) -> str:
+        guid_pattern = re.compile(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+        )
+        match = guid_pattern.search(url_or_id)
+        if match:
+            return match.group(0).upper()
+        if re.match(r"^[0-9a-fA-F-]{36}$", url_or_id.strip()):
+            return url_or_id.strip().upper()
+        raise ValueError(
+            f"Could not extract tournament GUID from '{url_or_id}'. "
+            "Provide a full USTA tournament URL or the GUID directly."
+        )
 
-        logger.info(f"Navigating to USTA tournament page: {url}")
-        
-        captured_json_data = []
+    def fetch_participants(self, tournament_guid: str) -> list:
+        payload = {
+            "operationName": "getTournamentParticipants",
+            "variables": {"tournamentId": tournament_guid},
+            "query": PARTICIPANT_QUERY
+        }
+        resp = self.session.post(PARTICIPANT_ENDPOINT, json=payload, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        participants = data.get("data", {}).get("getTournamentParticipants") or []
+        logger.info(f"Fetched {len(participants)} participants from tournament API.")
+        return participants
 
+    def fetch_events(self, tournament_guid: str) -> list:
+        payload = {
+            "operationName": "GetTournament",
+            "variables": {"id": tournament_guid.lower(), "previewMode": False},
+            "query": TOURNAMENT_QUERY
+        }
+        resp = self.session.post(TOURNAMENT_ENDPOINT, json=payload, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        events = data.get("data", {}).get("publishedTournament", {}).get("publishedEvents", [])
+        logger.info(f"Fetched {len(events)} events from tournament API.")
+        return events
+
+    def fetch_venue_players(self, tournament_guid: str, headless: bool = True) -> list:
+        """Fetch players from venue-tournaments platform using authenticated GraphQL via Playwright."""
+        logger.info(f"Fetching venue players for {tournament_guid}...")
+        payload = {
+            "operationName": "GetPlayers",
+            "variables": {
+                "id": tournament_guid,
+                "queryParameters": {
+                    "limit": 0,
+                    "offset": 0,
+                    "sorts": [{"property": "playerLastName", "sortDirection": "ASCENDING"}],
+                    "filters": []
+                }
+            },
+            "query": VENUE_GET_PLAYERS_QUERY
+        }
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=self.headless, args=["--disable-blink-features=AutomationControlled"])
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-            )
-            page = context.new_page()
+            with p.chromium.launch_persistent_context(PLAYWRIGHT_USER_DIR, headless=headless) as context:
+                page = context.pages[0] if context.pages else context.new_page()
+                resp = page.request.post(
+                    "https://prd-usta-kube-tournaments.clubspark.pro/",
+                    data=json.dumps(payload),
+                    headers={"Content-Type": "application/json"}
+                )
+                data = resp.json()
+        items = data.get("data", {}).get("paginatedPublicTournamentRegistrations", {}).get("items", [])
+        logger.info(f"Fetched {len(items)} players from venue API.")
+        return items
 
-            # Intercept network responses to catch API payloads
-            def handle_response(response):
-                try:
-                    if "api" in response.url or "players" in response.url or "competition" in response.url:
-                        content_type = response.headers.get("content-type", "")
-                        if "json" in content_type:
-                            data = response.json()
-                            captured_json_data.append((response.url, data))
-                except Exception:
-                    pass
-
-            page.on("response", handle_response)
-            
-            try:
-                # Go to page
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(5000)  # Wait for dynamic content to load
-                
-                # Check if we need to click a specific division / event dropdown
-                # Modern USTA tournament pages often have a dropdown to filter by division/event.
-                # Let's try to find and click a dropdown if target_division is specified.
-                self._select_division_if_needed(page, target_division)
-                
-                # Let's get the page source
-                html = page.content()
-                players = self._parse_players_html(html, target_division)
-                
-                # If we captured JSON API payloads, let's try to extract from them as they are cleaner
-                api_players = self._parse_from_captured_json(captured_json_data, target_division)
-                if api_players:
-                    logger.info(f"Successfully extracted {len(api_players)} players from captured API responses.")
-                    players.update(api_players)
-
-                # Save players to database cache
-                for usta_id, p_info in players.items():
-                    save_usta_cache(
-                        usta_id=usta_id,
-                        name=p_info["name"],
-                        city=p_info.get("city"),
-                        state=p_info.get("state"),
-                        wtn_singles=p_info.get("wtn_singles"),
-                        wtn_doubles=p_info.get("wtn_doubles"),
-                        usta_ranking=p_info.get("ranking")
-                    )
-
-                return list(players.values())
-
-            except Exception as e:
-                logger.error(f"Error scraping USTA: {e}")
-                # Save page screenshot for debugging in case of failure
-                try:
-                    page.screenshot(path="usta_error_screenshot.png")
-                    logger.info("Saved usta_error_screenshot.png for debugging.")
-                except Exception:
-                    pass
-                return []
-            finally:
-                browser.close()
-
-    def _select_division_if_needed(self, page, target_division):
-        if not target_division:
-            return
-        
-        logger.info(f"Attempting to select division/event: {target_division}")
-        try:
-            # Look for select dropdowns or tab buttons
-            # Let's try standard selectors for dropdowns
-            dropdowns = page.query_selector_all("select")
-            for select in dropdowns:
-                options = select.query_selector_all("option")
-                for option in options:
-                    text = option.inner_text().strip().lower()
-                    if target_division.lower() in text:
-                        val = option.get_attribute("value")
-                        select.select_option(value=val)
-                        page.wait_for_timeout(2000)
-                        logger.info(f"Selected option '{option.inner_text().strip()}' in dropdown.")
-                        return
-            
-            # If no select, try looking for buttons or tabs that match the division
-            buttons = page.query_selector_all("button, a")
-            for btn in buttons:
-                text = btn.inner_text().strip().lower()
-                if target_division.lower() in text:
-                    btn.click()
-                    page.wait_for_timeout(2000)
-                    logger.info(f"Clicked element containing '{target_division}'.")
-                    return
-        except Exception as e:
-            logger.warning(f"Could not select division via interactive UI: {e}")
-
-    def _parse_players_html(self, html: str, target_division: str = None):
-        """
-        Parses players list from HTML page.
-        """
-        soup = BeautifulSoup(html, "html.parser")
+    @staticmethod
+    def parse_venue_players(items: list, target_event_ids: set = None) -> list:
         players = {}
-
-        # 1. Look for anchor tags with player profile links
-        # USTA profiles often point to usta.com/en/home/play/player-profile.html#/?playerQuery=<usta_id> 
-        # or playtennis.usta.com/players/<usta_id> or playtennis.usta.com/Player/<usta_id>
-        profile_links = soup.find_all("a", href=True)
-        
-        for link in profile_links:
-            href = link["href"]
+        for item in items:
+            custom_ids = item.get("playerCustomIds", [])
             usta_id = None
-            
-            # Match usta id in different URL styles
-            if "playerQuery=" in href:
-                match = re.search(r"playerQuery=(\d+)", href)
-                if match:
-                    usta_id = match.group(1)
-            elif "ustaId=" in href:
-                match = re.search(r"ustaId=(\d+)", href)
-                if match:
-                    usta_id = match.group(1)
-            elif "/players/" in href or "/Player/" in href:
-                match = re.search(r"/players/([\w\d\-]+)", href, re.IGNORECASE) or re.search(r"/Player/([\w\d\-]+)", href, re.IGNORECASE)
-                if match:
-                    usta_id = match.group(1)
-            
-            if usta_id:
-                name = link.get_text().strip()
-                if not name or len(name) < 3 or any(x in name.lower() for x in ["profile", "view", "details"]):
-                    continue
-                
-                # Check if this player card/row contains location & ratings
-                # Traverse up to find container (like <tr> or player card <div>)
-                city, state = None, None
-                wtn_s, wtn_d = None, None
-                rank = None
-                
-                # Walk up parent elements (max 2 levels to stay within the player's own container)
-                parent = link
-                for _ in range(2):
-                    parent = parent.parent
-                    if not parent:
-                        break
-                    
-                    text_content = parent.get_text()
-                    
-                    # 1. Match City, ST (only if not already found in a closer parent)
-                    if city is None:
-                        location_match = re.search(r"[\n\r]?\s*([A-Za-z][A-Za-z .]*),\s*([A-Z]{2})\b", text_content)
-                        if location_match:
-                            city = location_match.group(1).strip()
-                            state = location_match.group(2).strip()
-                    
-                    # 2. Match WTN (e.g. WTN 16.4 or Singles WTN: 12.3)
-                    if wtn_s is None:
-                        wtn_matches = re.findall(r"(?:wtn|world tennis number)\s*:?\s*(\d+\.?\d*)", text_content, re.IGNORECASE)
-                        if wtn_matches:
-                            try:
-                                wtn_s = float(wtn_matches[0])
-                                if len(wtn_matches) > 1:
-                                    wtn_d = float(wtn_matches[1])
-                            except ValueError:
-                                pass
-                    
-                    # 3. Match ranking (e.g. Rank: 42 or Ranking: #42)
-                    if rank is None:
-                        rank_match = re.search(r"(?:rank|ranking|#)\s*:?\s*#?(\d+)", text_content, re.IGNORECASE)
-                        if rank_match:
-                            try:
-                                rank = int(rank_match.group(1))
-                            except ValueError:
-                                pass
-                
-                # Deduplicate and store
-                if usta_id not in players:
-                    players[usta_id] = {
-                        "usta_id": usta_id,
-                        "name": name,
-                        "city": city,
-                        "state": state,
-                        "wtn_singles": wtn_s,
-                        "wtn_doubles": wtn_d,
-                        "ranking": rank
-                    }
-                else:
-                    # Merge information if found more details
-                    p = players[usta_id]
-                    if city: p["city"] = city
-                    if state: p["state"] = state
-                    if wtn_s: p["wtn_singles"] = wtn_s
-                    if wtn_d: p["wtn_doubles"] = wtn_d
-                    if rank: p["ranking"] = rank
+            for cid in custom_ids:
+                if cid.get("key") == "ustaId":
+                    usta_id = cid.get("value")
+                    break
+            if not usta_id:
+                continue
 
-        # Fallback / manual row parsing
-        # If no profiles matched, let's parse tables
-        if not players:
-            # Look for table rows
-            for row in soup.find_all("tr"):
-                cells = [c.get_text().strip() for c in row.find_all(["td", "th"])]
-                if len(cells) >= 2:
-                    # Let's see if first or second cell has a name
-                    # and try to extract player from it
+            first = item.get("firstName") or ""
+            last = item.get("lastName") or ""
+            name = f"{last}, {first}" if first and last else item.get("playerName", "")
+
+            player_event_ids = {e["id"] for e in item.get("events", []) if e.get("id")}
+
+            if target_event_ids and not player_event_ids.intersection(target_event_ids):
+                continue
+
+            if usta_id not in players:
+                players[usta_id] = {
+                    "usta_id": usta_id,
+                    "name": name,
+                    "city": item.get("city"),
+                    "state": item.get("state"),
+                    "wtn_singles": None,
+                    "wtn_doubles": None,
+                    "ranking": None
+                }
+        return list(players.values())
+
+    def get_tournament_info(self, url_or_id: str) -> dict:
+        guid = self.extract_guid(url_or_id)
+        payload = {
+            "operationName": "GetTournament",
+            "variables": {"id": guid.lower(), "previewMode": False},
+            "query": TOURNAMENT_QUERY
+        }
+        resp = self.session.post(TOURNAMENT_ENDPOINT, json=payload, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        data = resp.json().get("data", {}).get("publishedTournament", {})
+        timings = data.get("timings") or {}
+        return {
+            "name": data.get("name", "Unknown"),
+            "start_date": timings.get("startDate", ""),
+            "end_date": timings.get("endDate", ""),
+            "guid": guid,
+        }
+
+    @staticmethod
+    def parse_players(participants: list, target_event_ids: set = None) -> list:
+        players = {}
+        for p in participants:
+            person = p.get("person") or {}
+            usta_id = None
+            for oid in person.get("personOtherIds", []):
+                if oid.get("uniqueOrganisationName") == "USTA":
+                    usta_id = oid.get("personId")
+                    break
+            if not usta_id:
+                continue
+
+            name = p.get("participantName") or f"{person.get('standardGivenName', '')} {person.get('standardFamilyName', '')}".strip()
+
+            addresses = person.get("addresses", [])
+            city = addresses[0].get("city") if addresses else None
+            state = addresses[0].get("state") if addresses else None
+
+            player_event_ids = {e["eventId"] for e in p.get("events", []) if e.get("eventId")}
+
+            if target_event_ids and not player_event_ids.intersection(target_event_ids):
+                continue
+
+            if usta_id not in players:
+                players[usta_id] = {
+                    "usta_id": usta_id,
+                    "name": name,
+                    "city": city,
+                    "state": state,
+                    "wtn_singles": None,
+                    "wtn_doubles": None,
+                    "ranking": None
+                }
+        return list(players.values())
+
+    @staticmethod
+    def get_event_divisions(events: list) -> list:
+        seen = set()
+        divisions = []
+        for e in events:
+            div = e.get("division", {})
+            display = USTAScraper._division_display_name(div)
+            if display and display not in seen:
+                seen.add(display)
+                divisions.append(display)
+        return divisions
+
+    @staticmethod
+    def _division_display_name(div: dict) -> str:
+        age = div.get("ageCategory", {})
+        evtype = str(div.get("eventType", "")).lower()
+        gender = str(div.get("gender", "")).lower()
+        max_age = age.get("maximumAge")
+        min_age = age.get("minimumAge")
+        age_part = f"U{max_age}" if max_age else (f"{min_age}+" if min_age else "")
+        parts = [p for p in [evtype, gender, age_part] if p]
+        return " ".join(parts).title() if parts else ""
+
+    def get_tournament_divisions(self, url_or_id: str) -> list:
+        events = self.fetch_events(self.extract_guid(url_or_id))
+        return self.get_event_divisions(events)
+
+    @staticmethod
+    def build_event_filter(events: list, target_division: str = None) -> set:
+        if not target_division:
+            return None
+        target_lower = target_division.lower()
+        matched = set()
+        for e in events:
+            div = e.get("division", {})
+            display_name = USTAScraper._division_display_name(div).lower()
+            gender = str(div.get("gender", "")).lower()
+            age = div.get("ageCategory", {})
+            max_age = age.get("maximumAge")
+
+            matched_pattern = False
+
+            if target_lower in display_name:
+                matched_pattern = True
+
+            # 2) Check gender + age combination (e.g. "girls 12" matches "girls u12")
+            target_has_gender = any(g in target_lower for g in ["boys", "girls"])
+            target_age_num = None
+            for word in target_lower.split():
+                if word.isdigit():
+                    target_age_num = int(word)
+                    break
+
+            if not matched_pattern and target_has_gender and target_age_num:
+                gender_match = "girls" in target_lower and "girls" in gender
+                gender_match = gender_match or ("boys" in target_lower and "boys" in gender)
+                age_match = max_age is not None and target_age_num == max_age
+                if gender_match and age_match:
+                    matched_pattern = True
+
+            if matched_pattern:
+                matched.add(e["id"])
+                logger.info(f"Matched event (id={e['id']}): {display_name}")
+
+        if not matched:
+            logger.warning(f"No event matched division filter '{target_division}'. Returning all participants.")
+        return matched if matched else None
+
+    def scrape_tournament(self, url_or_id: str, target_division: str = None,
+                           headless: bool = True) -> list:
+        guid = self.extract_guid(url_or_id)
+        logger.info(f"Fetching tournament GUID: {guid}")
+
+        events = self.fetch_events(guid)
+        target_event_ids = self.build_event_filter(events, target_division)
+
+        # Try standard public API first
+        participants = self.fetch_participants(guid)
+        if participants:
+            players = self.parse_players(participants, target_event_ids)
+        else:
+            # Fall back to venue API (requires authenticated Playwright session)
+            logger.info("Standard API returned no participants. Trying venue API (requires login)...")
+            venue_items = self.fetch_venue_players(guid, headless=headless)
+            if not venue_items:
+                logger.warning("No participants from venue API either.")
+                return []
+            players = self.parse_venue_players(venue_items, target_event_ids)
+
+        logger.info(f"Parsed {len(players)} players from tournament.")
+        return players
+
+
+    def fetch_player_profile(self, usta_id: str, headless: bool = True, browser=None) -> dict:
+        logger.info(f"Fetching USTA profile for ID: {usta_id}")
+        url = f"https://www.usta.com/en/home/play/player-search/profile.html#?uaid={usta_id}"
+
+        own_browser = browser is None
+        playwright = None
+        if own_browser:
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(headless=headless)
+
+        page = browser.new_page()
+        api_data = {}
+
+        def handle_response(resp):
+            if "playerInfo" in resp.url:
+                try:
+                    api_data["info"] = resp.json()
+                except Exception:
+                    pass
+            elif "playerRankings" in resp.url:
+                try:
+                    api_data["rankings"] = resp.json()
+                except Exception:
                     pass
 
-        return players
+        page.on("response", handle_response)
+        try:
+            page.set_default_navigation_timeout(30000)
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+        except Exception as e:
+            logger.warning(f"Page load error for {usta_id}: {e}")
+            page.close()
+            if own_browser:
+                browser.close()
+                playwright.stop()
+            return {}
 
-    def _parse_from_captured_json(self, captured_json, target_division):
-        """
-        Parses players out of intercepted network JSON responses.
-        USTA ClubSpark uses several JSON payloads for events & players.
-        """
-        players = {}
-        for url, data in captured_json:
-            try:
-                # Look for player arrays
-                # ClubSpark JSON responses often contain objects with "players", "entrants", "registrations", "competitors"
-                found_list = None
-                if isinstance(data, dict):
-                    # BFS/DFS to find lists with player objects
-                    found_list = self._search_dict_for_players(data)
-                elif isinstance(data, list):
-                    found_list = data
-                
-                if found_list:
-                    for item in found_list:
-                        if not isinstance(item, dict):
-                            continue
-                        # Standardize attributes
-                        name = item.get("name") or item.get("fullName") or item.get("displayName")
-                        # Handle cases where name is split
-                        if not name and "firstName" in item:
-                            name = f"{item.get('firstName', '')} {item.get('lastName', '')}".strip()
-                        
-                        usta_id = item.get("ustaId") or item.get("id") or item.get("memberId") or item.get("playerCode")
-                        if not name or not usta_id:
-                            continue
-                        
-                        # Convert to string
-                        usta_id = str(usta_id)
-                        
-                        # Exclude organizational / non-player IDs if they aren't numbers
-                        if not usta_id.isdigit():
-                            # Maybe check if it's in a profile link
-                            profile_url = item.get("profileUrl") or ""
-                            match = re.search(r"\d+", profile_url)
-                            if match:
-                                usta_id = match.group(0)
-                            else:
-                                continue
-                        
-                        city = item.get("city") or item.get("town") or item.get("hometown")
-                        state = item.get("state") or item.get("region")
-                        
-                        # WTN
-                        wtn_s = item.get("wtnSingles") or item.get("wtn_singles") or item.get("wtnRating")
-                        wtn_d = item.get("wtnDoubles") or item.get("wtn_doubles")
-                        
-                        # Rank
-                        rank = item.get("rank") or item.get("ranking")
-                        
-                        players[usta_id] = {
-                            "usta_id": usta_id,
-                            "name": name,
-                            "city": city,
-                            "state": state,
-                            "wtn_singles": float(wtn_s) if wtn_s else None,
-                            "wtn_doubles": float(wtn_d) if wtn_d else None,
-                            "ranking": int(rank) if rank else None
-                        }
-            except Exception as e:
-                logger.debug(f"Error parsing JSON item: {e}")
-                
-        return players
+        page.close()
+        if own_browser:
+            browser.close()
+            playwright.stop()
 
-    def _search_dict_for_players(self, d: dict):
-        # Recursively search for list of dictionary items containing keys like 'ustaId', 'wtn' or 'player'
-        for k, v in d.items():
-            if k in ["players", "entrants", "registrations", "competitors", "candidates", "results"] and isinstance(v, list):
-                return v
-            if isinstance(v, dict):
-                res = self._search_dict_for_players(v)
-                if res:
-                    return res
-            elif isinstance(v, list):
-                for item in v:
-                    if isinstance(item, dict):
-                        res = self._search_dict_for_players(item)
-                        if res:
-                            return res
-        return None
+        if not api_data.get("info"):
+            logger.warning(f"No profile data returned for USTA ID {usta_id}")
+            return {}
+
+        return self._parse_and_save_profile(usta_id, api_data)
+
+    def _parse_and_save_profile(self, usta_id: str, api_data: dict) -> dict:
+        info_data = api_data.get("info") or {}
+        raw_info = (info_data.get("data") or [{}])[0]
+        raw_rankings_data = api_data.get("rankings") or {}
+        raw_rankings = (raw_rankings_data.get("player") or {}).get("rankings") or []
+
+        name = raw_info.get("name")
+        if not name:
+            logger.warning(f"No name found in profile data for USTA ID {usta_id}")
+            return {}
+
+        info = {
+            "usta_id": usta_id,
+            "name": name,
+            "city": raw_info.get("city"),
+            "state": raw_info.get("state"),
+            "section": (raw_info.get("section") or {}).get("name"),
+            "district": (raw_info.get("district") or {}).get("name"),
+            "gender": raw_info.get("gender"),
+            "age_category": raw_info.get("ageCategory"),
+            "ball_color": (raw_info.get("ratings") or {}).get("ballColorRating"),
+            "competition_level": (raw_info.get("ratings") or {}).get("competitionLevelBallColor"),
+            "itf_tennis_id": raw_info.get("itfTennisId"),
+            "nationality": raw_info.get("nationality"),
+        }
+
+        wtns = (raw_info.get("ratings") or {}).get("wtn") or []
+        for w in wtns:
+            t = w.get("type", "").upper()
+            if t == "SINGLE":
+                info["wtn_singles"] = w.get("tennisNumber")
+                info["wtn_singles_confidence"] = w.get("confidence")
+                info["wtn_singles_date"] = w.get("ratingDate")
+            elif t == "DOUBLE":
+                info["wtn_doubles"] = w.get("tennisNumber")
+                info["wtn_doubles_confidence"] = w.get("confidence")
+                info["wtn_doubles_date"] = w.get("ratingDate")
+
+        rankings = []
+        for r in raw_rankings:
+            rnk = r.get("rank", {})
+            rec = r.get("record", {})
+            pts = r.get("pointsRecord", {})
+            rankings.append({
+                "display_label": r.get("displayLabel"),
+                "age_restriction": r.get("ageRestriction"),
+                "list_type": r.get("listType"),
+                "match_format": r.get("matchFormat"),
+                "rank_list_gender": r.get("rankListGender"),
+                "rank_national": rnk.get("national"),
+                "rank_section": rnk.get("section"),
+                "rank_district": rnk.get("district"),
+                "points": r.get("points"),
+                "points_singles": pts.get("singlesPoints"),
+                "points_doubles": pts.get("doublesPoints"),
+                "points_bonus": pts.get("bonusPoints"),
+                "wins": rec.get("win"),
+                "losses": rec.get("loss"),
+                "trend_direction": r.get("trendDirection"),
+                "publish_date": r.get("publishDate"),
+            })
+
+        save_usta_player_profile(
+            usta_id=info["usta_id"], name=info["name"],
+            city=info["city"], state=info["state"],
+            section=info["section"], district=info["district"],
+            gender=info["gender"], age_category=info["age_category"],
+            ball_color=info["ball_color"], competition_level=info["competition_level"],
+            itf_tennis_id=info["itf_tennis_id"], nationality=info["nationality"],
+            wtn_singles=info.get("wtn_singles"),
+            wtn_singles_confidence=info.get("wtn_singles_confidence"),
+            wtn_singles_date=info.get("wtn_singles_date"),
+            wtn_doubles=info.get("wtn_doubles"),
+            wtn_doubles_confidence=info.get("wtn_doubles_confidence"),
+            wtn_doubles_date=info.get("wtn_doubles_date"),
+            rankings=rankings,
+        )
+
+        result = {**info, "rankings": rankings}
+        logger.info(f"Profile saved for {info.get('name')} ({usta_id}): "
+                     f"{len(rankings)} ranking lists, WTN S={info.get('wtn_singles')} D={info.get('wtn_doubles')}")
+        return result
+
+    def fetch_profiles_for_tournament(self, url_or_id: str, target_division: str = None,
+                                       headless: bool = True,
+                                       progress_callback=None) -> list:
+        players = self.scrape_tournament(url_or_id, target_division, headless=headless)
+        results = []
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(headless=headless)
+        try:
+            for i, p in enumerate(players):
+                pct = (i + 1) / len(players)
+                msg = f"[{i+1}/{len(players)}] {p['name']}"
+                logger.info(msg)
+                if progress_callback:
+                    progress_callback(pct, msg)
+                try:
+                    profile = self.fetch_player_profile(p["usta_id"], headless=headless, browser=browser)
+                    if profile:
+                        results.append(profile)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch profile for {p['usta_id']}: {e}")
+        finally:
+            browser.close()
+            playwright.stop()
+        return results
+
 
 if __name__ == "__main__":
-    # Test execution
-    scraper = USTAScraper(headless=True)
-    # Testing with a dummy ID or placeholder
-    res = scraper.scrape_tournament("25-12345", "Boys")
-    print(f"Scraped {len(res)} players.")
+    import sys
+    scraper = USTAScraper()
+    if len(sys.argv) > 1 and sys.argv[1] == "profile":
+        pid = sys.argv[2] if len(sys.argv) > 2 else "2019015217"
+        res = scraper.fetch_player_profile(pid, headless=False)
+        print(json.dumps(res, indent=2, default=str))
+    else:
+        res = scraper.scrape_tournament(
+            "D6F0B896-6620-4052-B6C4-3ABBAE1C5A8B",
+            target_division="Boys 14"
+        )
+        print(f"Scraped {len(res)} players.")
+        for r in res[:5]:
+            print(f"  {r['name']} | {r.get('city')}, {r.get('state')} | USTA ID: {r['usta_id']}")
