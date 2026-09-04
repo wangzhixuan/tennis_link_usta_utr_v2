@@ -4,9 +4,9 @@ import csv
 import difflib
 import logging
 from typing import Optional
-from config import GOLDEN_MAPPING_PATH
-from db import get_mapping, save_mapping, save_utr_cache
-from utr_scraper import UTRScraper
+from scripts.config import GOLDEN_MAPPING_PATH
+from scripts.db import get_mapping, save_mapping, save_utr_cache
+from scripts.utr_scraper import UTRScraper
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Use test database
-import db
+from scripts import db
 db.DB_PATH = os.path.join(tempfile.gettempdir(), "tennislink_test_p4.db")
 db.init_db()
 
@@ -16,8 +16,8 @@ print("=" * 60)
 
 # 1. Name normalization
 print("\n[1/5] Testing name normalization...")
-from matcher import PlayerMatcher
-from utr_scraper import UTRScraper
+from scripts.matcher import PlayerMatcher
+from scripts.utr_scraper import UTRScraper
 
 matcher = PlayerMatcher(UTRScraper())
 
@@ -63,7 +63,7 @@ print("  location_score: all cases passed")
 
 # 4. Full match flow - cache hit
 print("\n[4/5] Testing full match flow (with mocked UTR scraper)...")
-from db import save_mapping, get_mapping, save_usta_player_profile
+from scripts.db import save_mapping, get_mapping, save_usta_player_profile
 
 save_mapping("CACHE_TEST", "UTR_CACHED", "manual", 1.0)
 save_usta_player_profile("CACHE_TEST", "Test Player", city="Boston", state="MA", wtn_singles=10.0, rankings=[{"points": 5}])

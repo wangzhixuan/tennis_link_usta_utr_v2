@@ -69,8 +69,8 @@ RANKINGS_FIXTURE = {
 
 # 1. Test _parse_and_save_profile
 print("\n[1/5] Testing _parse_and_save_profile with fixture data...")
-from usta_scraper import USTAScraper
-from db import init_db, get_usta_player_profile, get_usta_rankings
+from scripts.usta_scraper import USTAScraper
+from scripts.db import init_db, get_usta_player_profile, get_usta_rankings
 
 init_db()
 

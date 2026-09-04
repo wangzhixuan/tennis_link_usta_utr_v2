@@ -12,7 +12,7 @@ print("=" * 60)
 
 # 1. Verify config loads
 print("\n[1/4] Testing config...")
-import config
+from scripts import config
 assert config.BASE_DIR.exists(), "BASE_DIR should exist"
 assert config.DB_PATH.endswith(".db"), "DB_PATH should be a .db file"
 print(f"  BASE_DIR:  {config.BASE_DIR}")
@@ -22,10 +22,10 @@ print("  PASSED")
 
 # 2. Verify DB module imports and table creation
 print("\n[2/4] Testing database initialization...")
-from db import get_connection, init_db, save_usta_player_profile, get_usta_player_profile, save_utr_player_profile, get_utr_player_profile, save_mapping, get_mapping
+from scripts.db import get_connection, init_db, save_usta_player_profile, get_usta_player_profile, save_utr_player_profile, get_utr_player_profile, save_mapping, get_mapping
 
 # Use a temporary database for testing
-import db
+from scripts import db
 original_db_path = db.DB_PATH
 db.DB_PATH = os.path.join(tempfile.gettempdir(), "tennislink_test.db")
 

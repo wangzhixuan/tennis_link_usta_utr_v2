@@ -3,8 +3,8 @@ import json
 import logging
 import requests
 from typing import Optional
-from config import UTR_USER, UTR_PASS, PLAYWRIGHT_USER_DIR
-from db import save_utr_player_profile
+from scripts.config import UTR_USER, UTR_PASS, PLAYWRIGHT_USER_DIR
+from scripts.db import save_utr_player_profile
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

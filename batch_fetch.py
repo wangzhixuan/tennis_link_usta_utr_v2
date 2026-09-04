@@ -8,10 +8,10 @@ import argparse
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
-from config import DB_PATH, GOLDEN_MAPPING_PATH
-from db import get_usta_player_profile, get_utr_player_profile
-from usta_scraper import USTAScraper
-from utr_scraper import UTRScraper
+from scripts.config import DB_PATH, GOLDEN_MAPPING_PATH
+from scripts.db import get_usta_player_profile, get_utr_player_profile
+from scripts.usta_scraper import USTAScraper
+from scripts.utr_scraper import UTRScraper
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "batch_fetch.log")
 _fh = logging.FileHandler(LOG_FILE, mode="w")

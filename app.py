@@ -7,11 +7,11 @@ import datetime
 import pandas as pd
 import streamlit as st
 
-from config import UTR_USER, UTR_PASS, DB_PATH
-from usta_scraper import USTAScraper
-from utr_scraper import UTRScraper
-from matcher import PlayerMatcher
-from db import get_connection, save_mapping, save_usta_player_history, save_utr_player_history
+from scripts.config import UTR_USER, UTR_PASS, DB_PATH
+from scripts.usta_scraper import USTAScraper
+from scripts.utr_scraper import UTRScraper
+from scripts.matcher import PlayerMatcher
+from scripts.db import get_connection, save_mapping, save_usta_player_history, save_utr_player_history
 
 st.set_page_config(page_title="TennisLink", layout="wide", initial_sidebar_state="expanded")
 
@@ -23,7 +23,7 @@ UTR_PROFILE_URL = "https://app.utrsports.net/profiles/{}"
 def check_usta_login() -> bool:
     """Check if the persistent Playwright context has a valid www.usta.com session."""
     from playwright.sync_api import sync_playwright
-    from utr_scraper import PLAYWRIGHT_USER_DIR
+    from scripts.utr_scraper import PLAYWRIGHT_USER_DIR
     try:
         with sync_playwright() as p:
             with p.chromium.launch_persistent_context(PLAYWRIGHT_USER_DIR, headless=True) as context:
@@ -40,7 +40,7 @@ def check_usta_login() -> bool:
 def check_utr_login() -> bool:
     """Check if the persistent Playwright context has a valid UTR JWT."""
     from playwright.sync_api import sync_playwright
-    from utr_scraper import PLAYWRIGHT_USER_DIR
+    from scripts.utr_scraper import PLAYWRIGHT_USER_DIR
     try:
         with sync_playwright() as p:
             with p.chromium.launch_persistent_context(PLAYWRIGHT_USER_DIR, headless=True) as context:
@@ -53,7 +53,7 @@ def check_utr_login() -> bool:
 def open_login_browser(service: str):
     """Open a headed browser for manual login to USTA or UTR."""
     from playwright.sync_api import sync_playwright
-    from utr_scraper import PLAYWRIGHT_USER_DIR
+    from scripts.utr_scraper import PLAYWRIGHT_USER_DIR
     url = "https://www.usta.com/en/home/play/player-search/profile.html#?uaid=2019015217" if service == "USTA" \
         else "https://app.utrsports.net/login"
     with sync_playwright() as p:

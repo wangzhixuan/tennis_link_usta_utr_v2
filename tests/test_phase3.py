@@ -10,7 +10,7 @@ print("=" * 60)
 
 # 1. Class instantiation
 print("\n[1/5] Testing class instantiation...")
-from utr_scraper import UTRScraper
+from scripts.utr_scraper import UTRScraper
 scraper = UTRScraper(email="test@test.com", password="testpass")
 assert scraper.email == "test@test.com"
 assert scraper.password == "testpass"

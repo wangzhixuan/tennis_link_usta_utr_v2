@@ -4,8 +4,8 @@ import logging
 import requests
 from typing import Optional
 from playwright.sync_api import sync_playwright
-from db import save_usta_player_profile
-from utr_scraper import PLAYWRIGHT_USER_DIR
+from scripts.db import save_usta_player_profile
+from scripts.utr_scraper import PLAYWRIGHT_USER_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

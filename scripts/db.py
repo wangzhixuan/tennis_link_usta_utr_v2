@@ -1,7 +1,7 @@
 import sqlite3
 import json
 import datetime
-from config import DB_PATH
+from scripts.config import DB_PATH
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)

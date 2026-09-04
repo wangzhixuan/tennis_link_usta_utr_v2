@@ -22,11 +22,12 @@ main.py                CLI: single tournament run + TSV export
 batch_fetch.py         Headless batch refresh of USTA + UTR caches
 monitor.py             Progress monitor for batch_fetch
 launch_batch.py        Detached launcher for batch_fetch
-usta_scraper.py        USTA TennisLink scraper
-utr_scraper.py         UTR API scraper (JWT-first, no-JWT fallback)
-matcher.py             USTA -> UTR matching heuristics + golden mapping loader
-db.py                  SQLite schema + cache accessors
-config.py              .env-driven configuration
+scripts/
+  config.py            .env-driven configuration
+  db.py                SQLite schema + cache accessors
+  matcher.py           USTA -> UTR matching heuristics + golden mapping loader
+  usta_scraper.py      USTA TennisLink scraper
+  utr_scraper.py       UTR API scraper (JWT-first, no-JWT fallback)
 tests/test_phase*.py   Standalone (script-style) tests, run directly
 ```
 

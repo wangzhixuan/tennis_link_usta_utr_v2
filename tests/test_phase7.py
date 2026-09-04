@@ -18,8 +18,8 @@ print("=" * 60)
 print("Phase 7: Realistic UTR API Tests (Live + Edge Cases)")
 print("=" * 60)
 
-from utr_scraper import UTRScraper, SEARCH_URL
-from db import init_db
+from scripts.utr_scraper import UTRScraper, SEARCH_URL
+from scripts.db import init_db
 
 init_db()
 
@@ -344,7 +344,7 @@ print("  PASSED")
 # ── 8. DB caching round-trip ──────────────────────────────────────────
 print("\n[8/8] DB caching round-trip...")
 
-from db import save_utr_player_profile, get_utr_player_profile, get_all_cache
+from scripts.db import save_utr_player_profile, get_utr_player_profile, get_all_cache
 
 save_utr_player_profile("UTR_LIVE_TEST", "Robert Jordan", city="Miami", state="FL", utr_singles=8.5, utr_doubles=7.2)
 cached = get_utr_player_profile("UTR_LIVE_TEST")
