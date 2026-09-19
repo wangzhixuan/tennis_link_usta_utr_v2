@@ -12,6 +12,9 @@ a Streamlit web app. Reports export to `data/tournaments/*.tsv`.
 - Matches players to UTR profiles via the **golden mapping CSV** first, then a
   name/location heuristic, with a `player_mappings` table that lets you correct bad
   matches (`manual_correct` rows are authoritative).
+- **Auto-recovers changed UTR IDs**: if a stored UTR profile no longer exists (HTTP 404 —
+  the ID changed, was merged, or removed), it searches for the player's new UTR ID,
+  updates the mapping, and fetches the fresh rating automatically.
 - Caches everything in SQLite (`tennislink.db`) so re-runs are fast and offline-safe.
 
 ## Project layout
@@ -28,7 +31,7 @@ scripts/
   matcher.py           USTA -> UTR matching heuristics + golden mapping loader
   usta_scraper.py      USTA TennisLink scraper
   utr_scraper.py       UTR API scraper (JWT-first, no-JWT fallback)
-tests/test_phase*.py   Standalone (script-style) tests, run directly
+tests/test_*.py        Standalone (script-style) tests, run directly
 ```
 
 ## Prerequisites
@@ -138,10 +141,14 @@ python monitor.py        # in a second terminal to watch progress
 The tests are plain scripts (no pytest needed):
 
 ```sh
-python tests/test_phase1.py
-python tests/test_phase2.py
-...
-python tests/test_phase7.py
+python tests/test_setup_and_db.py            # config + SQLite schema/CRUD
+python tests/test_usta_tournament_scraper.py # USTA GUID parsing, draws, division filtering
+python tests/test_utr_scraper.py             # UTR search/profile/match parsing, login guard
+python tests/test_matcher.py                 # name/location + match-history matching engine
+python tests/test_cli_and_reporting.py       # CLI args, Excel formatting, full pipeline
+python tests/test_usta_profile_rankings.py   # USTA profile/WTN/ranking fetch + persistence
+python tests/test_utr_api_live.py            # live UTR API + response edge cases
+python tests/test_utr_id_recovery.py         # auto-recovery when a UTR ID changes/disappears
 ```
 
 Note: tests use the project's SQLite DB and may recreate/clear it. Run them on a scratch

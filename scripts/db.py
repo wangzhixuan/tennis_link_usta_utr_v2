@@ -305,6 +305,12 @@ def get_mapping(usta_id):
         return dict(row) if row else None
 
 
+def delete_mapping(usta_id):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM player_mappings WHERE usta_id = ?", (usta_id,))
+        conn.commit()
+
+
 def get_all_cache(table_name):
     with get_connection() as conn:
         rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()

@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 print("=" * 60)
-print("Phase 3: Testing UTR Scraper")
+print("UTR Scraper: search/profile/matches parsing")
 print("=" * 60)
 
 # 1. Class instantiation
@@ -83,32 +83,55 @@ assert candidates[2]["city"] is None  # No location field
 assert candidates[2]["utr_singles"] == 8.5
 print("  PASSED")
 
-# 3. Test get_player_matches parsing
+# 3. Test get_player_matches parsing (current v4 events/results/players shape)
 print("\n[3/5] Testing get_player_matches API response...")
 mock_matches_response = {
-    "results": [
-        {"opponent": {"name": "Bob Smith"}, "date": "2024-06-15", "score": "6-4, 6-3", "outcome": "WIN"},
-        {"opponent": {"name": "Carol Davis"}, "date": "2024-05-20", "score": "7-5, 4-6, 6-2", "outcome": "LOSS"}
+    "events": [
+        {
+            "results": [
+                {
+                    "players": {
+                        "sideA": {"id": 12345, "firstName": "Alice", "lastName": "Williams", "singlesUtr": 11.2},
+                        "sideB": {"id": 99901, "firstName": "Bob", "lastName": "Smith", "singlesUtr": 9.4},
+                    }
+                },
+                {
+                    "players": {
+                        "sideA": {"id": 12345, "firstName": "Alice", "lastName": "Williams", "singlesUtr": 11.2},
+                        "sideB": {"id": 99902, "firstName": "Carol", "lastName": "Davis", "singlesUtr": 8.1},
+                    }
+                },
+                # Duplicate opponent should be de-duplicated
+                {
+                    "players": {
+                        "sideA": {"id": 12345, "firstName": "Alice", "lastName": "Williams"},
+                        "sideB": {"id": 99901, "firstName": "Bob", "lastName": "Smith"},
+                    }
+                },
+            ]
+        }
     ]
 }
 
-# Need to patch login to return True
-with patch.object(scraper, 'login_if_needed', return_value=True), \
-     patch.object(scraper.session, 'get') as mock_get:
+# get_player_matches uses the v4 API via requests.get and requires a JWT cookie
+scraper._jwt_cache = "test_jwt"
+with patch('scripts.utr_scraper.requests.get') as mock_get:
     resp = MagicMock()
     resp.status_code = 200
     resp.json.return_value = mock_matches_response
     mock_get.return_value = resp
-    
-    matches = scraper.get_player_matches("UTR12345")
-    
-    assert len(matches) == 2
-    assert matches[0]["opponent_name"] == "Bob Smith"
-    assert matches[0]["win"] == True
-    assert matches[1]["opponent_name"] == "Carol Davis"
-    assert matches[1]["win"] == False
-    print(f"  Match 1: {matches[0]['opponent_name']} - {matches[0]['date']} - Win={matches[0]['win']}")
-    print(f"  Match 2: {matches[1]['opponent_name']} - {matches[1]['date']} - Win={matches[1]['win']}")
+
+    matches = scraper.get_player_matches("12345")
+
+    assert len(matches) == 2, f"Expected 2 unique opponents (self + duplicate excluded), got {len(matches)}"
+    assert matches[0]["opponent_name"] == "Smith, Bob"
+    assert matches[0]["opponent_utr_id"] == "99901"
+    assert matches[1]["opponent_name"] == "Davis, Carol"
+    assert matches[1]["opponent_utr_id"] == "99902"
+    for m in matches:
+        assert m["opponent_utr_id"] != "12345", "Self should be excluded from opponents"
+    print(f"  Opponent 1: {matches[0]['opponent_name']} (UTR {matches[0]['opponent_utr_id']})")
+    print(f"  Opponent 2: {matches[1]['opponent_name']} (UTR {matches[1]['opponent_utr_id']})")
     print("  PASSED")
 
 # 4. Test search_players with empty/error responses
@@ -155,5 +178,5 @@ with patch.object(scraper_with_creds.session, 'post') as mock_post:
     print("  PASSED")
 
 print("\n" + "=" * 60)
-print("Phase 3: ALL TESTS PASSED")
+print("UTR Scraper: ALL TESTS PASSED")
 print("=" * 60)

@@ -11,7 +11,7 @@ db.DB_PATH = os.path.join(tempfile.gettempdir(), "tennislink_test_p4.db")
 db.init_db()
 
 print("=" * 60)
-print("Phase 4: Testing Matching Engine")
+print("Player Matcher: name/location + match-history")
 print("=" * 60)
 
 # 1. Name normalization
@@ -166,5 +166,5 @@ for _ in range(3):
         gc.collect()
 
 print("\n" + "=" * 60)
-print("Phase 4: ALL TESTS PASSED")
+print("Player Matcher: ALL TESTS PASSED")
 print("=" * 60)

@@ -121,6 +121,27 @@ def main():
         logger.info(f"[{idx+1}/{len(usta_players)}] Resolving player: {up['name']}")
         match_res = matcher.find_utr_profile(up, usta_players, no_cross_ref=args.no_cross_ref)
 
+        # Verify the mapped UTR profile still exists; auto re-match if the ID changed/was merged
+        if match_res and match_res.get("utr_id"):
+            utr_id = str(match_res["utr_id"])
+            profile = utr_scraper.get_player_profile(utr_id)
+            if profile is None and utr_scraper.last_profile_not_found:
+                logger.warning(
+                    f"UTR ID {utr_id} for '{up['name']}' no longer exists; searching for updated ID..."
+                )
+                new_match = matcher.rematch_player(
+                    up, usta_players,
+                    no_cross_ref=args.no_cross_ref,
+                    exclude_utr_ids={utr_id},
+                )
+                if new_match and new_match.get("utr_id"):
+                    match_res = new_match
+                    profile = utr_scraper.get_player_profile(str(new_match["utr_id"]))
+            if profile:
+                match_res = dict(match_res)
+                match_res["utr_singles"] = profile.get("utr_singles")
+                match_res["utr_doubles"] = profile.get("utr_doubles")
+
         def _val(v, default="N/A"):
             return v if v is not None else default
 

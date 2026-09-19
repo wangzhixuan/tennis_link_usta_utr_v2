@@ -15,7 +15,7 @@ if hasattr(sys.stdout, 'reconfigure'):
         pass
 
 print("=" * 60)
-print("Phase 7: Realistic UTR API Tests (Live + Edge Cases)")
+print("UTR API (live): edge cases & resilience")
 print("=" * 60)
 
 from scripts.utr_scraper import UTRScraper, SEARCH_URL
@@ -270,36 +270,67 @@ print("  PASSED")
 print("\n[6/8] Match history: multiple response formats...")
 
 scraper = UTRScraper()
+scraper._jwt_cache = "test_jwt"  # bypass Playwright JWT extraction
+
+
+def _player(pid, first, last, singles=None):
+    p = {"id": pid, "firstName": first, "lastName": last}
+    if singles is not None:
+        p["singlesUtr"] = singles
+    return p
+
 
 formats = [
-    ("results key (standard)", {"results": [{"opponent": {"name": "Alice"}, "outcome": "WIN"}]}),
-    ("items key", {"items": [{"opponent": {"name": "Bob"}, "outcome": "LOSS"}]}),
-    ("data key", {"data": [{"opponentPlayer": {"fullName": "Carol"}, "result": "WIN"}]}),
-    ("win bool", {"results": [{"opponent": {"name": "Dave"}, "win": True}]}),
-    ("missing opponent name", {"results": [{"opponent": {"name": ""}}, {"opponent": {"name": "Eve"}}]}),
-    ("empty results list", {"results": []}),
-    ("malformed — no results key", {"status": "ok"}),
+    ("standard results", {
+        "events": [{"results": [
+            {"players": {"A": _player(1, "Alice", "Smith"), "B": _player(2, "Bob", "Jones", 9.1)}},
+        ]}]
+    }),
+    ("draws fallback", {
+        "events": [{"draws": [{"results": [
+            {"players": {"A": _player(1, "Alice", "Smith"), "B": _player(3, "Carol", "Lee", 8.4)}},
+        ]}]}]
+    }),
+    ("multiple events + self excluded", {
+        "events": [
+            {"results": [{"players": {"A": _player(1, "Alice", "Smith"), "B": _player(2, "Bob", "Jones")}}]},
+            {"results": [{"players": {"A": _player(1, "Alice", "Smith"), "B": _player(4, "Dave", "Kim")}}]},
+        ]
+    }),
+    ("empty events", {"events": []}),
+    ("missing events key", {"status": "ok"}),
+    ("malformed players", {"events": [{"results": [{"players": {}}]}]}),
 ]
 
-for label, response_data in formats:
-    with patch.object(scraper, 'login_if_needed', return_value=True), \
-         patch.object(scraper.session, 'get') as mock_get:
+expected_counts = [1, 1, 2, 0, 0, 0]
+for (label, response_data), exp in zip(formats, expected_counts):
+    with patch('scripts.utr_scraper.requests.get') as mock_get:
         resp = MagicMock()
         resp.status_code = 200
         resp.json.return_value = response_data
         mock_get.return_value = resp
-        matches = scraper.get_player_matches("TEST123")
-        assert isinstance(matches, list), f"get_player_matches should always return a list: {label}"
+        matches = scraper.get_player_matches("1")
+        assert isinstance(matches, list), f"{label}: should always return a list"
+        assert len(matches) == exp, f"{label}: expected {exp} opponents, got {len(matches)}"
         for m in matches:
             assert "opponent_name" in m
-            assert "win" in m
-    print(f"  {label}: {len(matches)} matches — PASSED")
+            assert "opponent_utr_id" in m
+            assert m["opponent_utr_id"] != "1", f"{label}: self should be excluded"
+    print(f"  {label}: {len(matches)} opponents — PASSED")
 
-# Match history without login (should return [])
-with patch.object(scraper, 'login_if_needed', return_value=False):
-    matches = scraper.get_player_matches("TEST123")
-    assert matches == []
-    print("  No login returns empty list: PASSED")
+# Non-200 response returns []
+with patch('scripts.utr_scraper.requests.get') as mock_get:
+    resp = MagicMock()
+    resp.status_code = 500
+    mock_get.return_value = resp
+    assert scraper.get_player_matches("1") == []
+    print("  HTTP error returns empty list: PASSED")
+
+# Without a JWT, no request is made and [] is returned
+scraper_no_jwt = UTRScraper()
+with patch.object(scraper_no_jwt, '_get_jwt', return_value=None):
+    assert scraper_no_jwt.get_player_matches("1") == []
+    print("  No JWT returns empty list: PASSED")
 
 print("  PASSED")
 
@@ -408,7 +439,7 @@ mock_search_results = [
      "utr_singles": 0.0, "utr_doubles": None},
 ]
 
-def mock_search(self, name):
+def mock_search(self, name, **kwargs):
     return mock_search_results
 
 def mock_profile(self, utr_id):
@@ -433,7 +464,7 @@ with patch.object(UTRScraper, 'search_players', mock_search), \
 mock_search_nonzero = [
     {"utr_id": "300", "name": "Already Known", "utr_singles": 7.5, "utr_doubles": 6.0},
 ]
-with patch.object(UTRScraper, 'search_players', lambda self, n: mock_search_nonzero), \
+with patch.object(UTRScraper, 'search_players', lambda self, n, **kwargs: mock_search_nonzero), \
      patch.object(UTRScraper, 'get_player_profile', lambda self, uid: {"utr_singles": 99.9}):
     s = UTRScraper()
     enriched = s.search_and_enrich("Known")
@@ -444,5 +475,5 @@ print("  PASSED")
 
 
 print("\n" + "=" * 60)
-print("Phase 7: ALL TESTS PASSED")
+print("UTR API (live): ALL TESTS PASSED")
 print("=" * 60)

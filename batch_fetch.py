@@ -12,6 +12,7 @@ from scripts.config import DB_PATH, GOLDEN_MAPPING_PATH
 from scripts.db import get_usta_player_profile, get_utr_player_profile
 from scripts.usta_scraper import USTAScraper
 from scripts.utr_scraper import UTRScraper
+from scripts.matcher import PlayerMatcher
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "batch_fetch.log")
 _fh = logging.FileHandler(LOG_FILE, mode="w")
@@ -71,6 +72,7 @@ def fetch_pairs(pairs, do_usta, do_utr, headless=True):
         except Exception as e:
             logger.warning(f"JWT extraction failed: {e}")
     utr_scraper = UTRScraper(jwt=utr_jwt)
+    matcher = PlayerMatcher(utr_scraper)
 
     playwright = None
     browser = None
@@ -104,6 +106,27 @@ def fetch_pairs(pairs, do_usta, do_utr, headless=True):
                         if profile:
                             utr_fetched += 1
                             did_fetch = True
+                        elif utr_scraper.last_profile_not_found:
+                            # UTR ID no longer exists (merged/changed) -> auto re-match
+                            logger.warning(f"  UTR ID {utr_id} no longer exists; searching for updated ID...")
+                            usta_prof = get_usta_player_profile(usta_id) or {}
+                            up = {
+                                "usta_id": usta_id,
+                                "name": usta_prof.get("name") or "",
+                                "city": usta_prof.get("city"),
+                                "state": usta_prof.get("state"),
+                            }
+                            new_match = matcher.rematch_player(up, exclude_utr_ids={str(utr_id)})
+                            if new_match and new_match.get("utr_id"):
+                                new_profile = utr_scraper.get_player_profile(str(new_match["utr_id"]))
+                                if new_profile:
+                                    utr_fetched += 1
+                                    did_fetch = True
+                                    logger.info(f"  Re-matched {usta_id}: {utr_id} -> {new_match['utr_id']}")
+                                else:
+                                    logger.warning(f"  Re-matched to {new_match['utr_id']} but profile fetch failed")
+                            else:
+                                logger.warning(f"  Could not find a replacement UTR profile for {usta_id}")
                         else:
                             logger.warning(f"  Empty UTR profile for {utr_id}")
                     except Exception as e:

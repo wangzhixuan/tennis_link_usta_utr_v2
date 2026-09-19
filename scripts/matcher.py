@@ -5,7 +5,7 @@ import difflib
 import logging
 from typing import Optional
 from scripts.config import GOLDEN_MAPPING_PATH
-from scripts.db import get_mapping, save_mapping, save_utr_cache
+from scripts.db import get_mapping, save_mapping, save_utr_cache, get_utr_player_profile
 from scripts.utr_scraper import UTRScraper
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -111,7 +111,15 @@ class PlayerMatcher:
 
         return 0.75
 
-    def find_utr_profile(self, usta_player: dict, tournament_players: list = None, no_cross_ref: bool = False) -> dict:
+    def find_utr_profile(
+        self,
+        usta_player: dict,
+        tournament_players: list = None,
+        no_cross_ref: bool = False,
+        ignore_cache: bool = False,
+        exclude_utr_ids: set = None,
+        validate_cached: bool = False,
+    ) -> Optional[dict]:
         """
         Finds the matching UTR profile for a given USTA player dict.
         
@@ -119,22 +127,44 @@ class PlayerMatcher:
         - usta_player: dict containing 'name', 'usta_id', 'city', 'state', etc.
         - tournament_players: list of dicts of other players in this tournament
                              (used for circle of competition heuristics)
+        - no_cross_ref: whether to skip tournament opponent cross-referencing
+        - ignore_cache: if True, skips local database cache to force re-search
+        - exclude_utr_ids: set of UTR IDs to exclude (e.g. dead/changed 404 IDs)
+        - validate_cached: if True, verifies cached UTR ID still exists on UTR Sports
         """
         usta_id = usta_player["usta_id"]
         usta_name = usta_player["name"]
         hometown_city = usta_player.get("city")
         hometown_state = usta_player.get("state")
         
+        excluded = {str(x) for x in exclude_utr_ids} if exclude_utr_ids else set()
+
         # Level 1: Check Local Cache Map
-        cached_mapping = get_mapping(usta_id)
-        if cached_mapping:
-            logger.info(f"Cache HIT for USTA ID {usta_id} -> UTR ID {cached_mapping['utr_id']}")
-            return {
-                "utr_id": cached_mapping["utr_id"],
-                "confidence": cached_mapping["confidence"],
-                "match_method": "cached",
-                "source": "local_db"
-            }
+        if not ignore_cache:
+            cached_mapping = get_mapping(usta_id)
+            if cached_mapping and str(cached_mapping.get("utr_id")) not in excluded:
+                utr_id = str(cached_mapping["utr_id"])
+                # If validation requested, verify that the cached profile still exists
+                if validate_cached and not self.utr_scraper.check_profile_exists(utr_id):
+                    logger.warning(
+                        f"Cached UTR ID {utr_id} for USTA ID {usta_id} no longer exists on UTR Sports (404)! "
+                        f"Bypassing stale mapping to search for new profile..."
+                    )
+                    excluded.add(utr_id)
+                else:
+                    logger.info(f"Cache HIT for USTA ID {usta_id} -> UTR ID {utr_id}")
+                    cached_profile = get_utr_player_profile(utr_id)
+                    return {
+                        "utr_id": utr_id,
+                        "confidence": cached_mapping["confidence"],
+                        "match_method": "cached",
+                        "source": "local_db",
+                        "name": cached_profile.get("name") if cached_profile else None,
+                        "city": cached_profile.get("city") if cached_profile else None,
+                        "state": cached_profile.get("state") if cached_profile else None,
+                        "utr_singles": cached_profile.get("utr_singles") if cached_profile else None,
+                        "utr_doubles": cached_profile.get("utr_doubles") if cached_profile else None,
+                    }
 
         # Level 2: Search UTR and Apply Name & Location matching
         candidates = self.utr_scraper.search_players(usta_name, city=hometown_city, state=hometown_state)
@@ -146,12 +176,18 @@ class PlayerMatcher:
                 logger.info(f"No exact name results. Trying broad search for: {broad_name}")
                 candidates = self.utr_scraper.search_players(broad_name, city=hometown_city, state=hometown_state)
         
+        if excluded and candidates:
+            candidates = [c for c in candidates if str(c.get("utr_id")) not in excluded]
+
         if not candidates:
             logger.warning(f"No UTR candidates found for player: {usta_name}")
             return None
 
         scored_candidates = []
         for cand in candidates:
+            if str(cand.get("utr_id")) in excluded:
+                continue
+
             # 1. Name match score
             name_sim = self.name_similarity(usta_name, cand["name"])
             if name_sim < 0.6:
@@ -263,3 +299,45 @@ class PlayerMatcher:
             "match_method": best_match["match_method"],
             "source": "search"
         }
+
+    def rematch_player(
+        self,
+        usta_player: dict,
+        tournament_players: list = None,
+        no_cross_ref: bool = False,
+        exclude_utr_ids: set = None,
+    ) -> Optional[dict]:
+        """
+        Forces a fresh search for a player's UTR profile, ignoring any cached mapping.
+        Used when the previously mapped UTR ID no longer exists (e.g. merged, changed, or deleted).
+        Excludes known dead/changed UTR IDs from candidate results.
+        If a qualified match is found, updates player_mappings with the new UTR ID.
+        """
+        usta_id = usta_player.get("usta_id")
+        excluded = set(str(x) for x in exclude_utr_ids) if exclude_utr_ids else set()
+        old_mapping = get_mapping(usta_id) if usta_id else None
+        if old_mapping and old_mapping.get("utr_id"):
+            excluded.add(str(old_mapping["utr_id"]))
+
+        logger.info(
+            f"Auto re-matching player '{usta_player.get('name')}' (USTA ID: {usta_id}, "
+            f"excluding dead UTR IDs: {excluded})..."
+        )
+
+        match = self.find_utr_profile(
+            usta_player=usta_player,
+            tournament_players=tournament_players,
+            no_cross_ref=no_cross_ref,
+            ignore_cache=True,
+            exclude_utr_ids=excluded,
+        )
+
+        if match:
+            logger.info(
+                f"Successfully re-matched '{usta_player.get('name')}': new UTR ID {match['utr_id']} "
+                f"(confidence={match['confidence']:.2f}, method={match['match_method']})"
+            )
+        else:
+            logger.warning(f"Could not find a replacement UTR profile for '{usta_player.get('name')}'.")
+
+        return match

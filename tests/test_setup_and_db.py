@@ -5,9 +5,9 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Phase 1 Test: verify imports, config, and database
+# Setup & Database: verify imports, config, and database
 print("=" * 60)
-print("Phase 1: Testing Project Setup")
+print("Setup & Database: config + schema/CRUD")
 print("=" * 60)
 
 # 1. Verify config loads
@@ -105,5 +105,5 @@ for _ in range(3):
         gc.collect()
 
 print("\n" + "=" * 60)
-print("Phase 1: ALL TESTS PASSED")
+print("Setup & Database: ALL TESTS PASSED")
 print("=" * 60)

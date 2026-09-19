@@ -5,7 +5,7 @@ import json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 print("=" * 60)
-print("Phase 2: Testing USTA GraphQL Scraper")
+print("USTA Tournament Scraper: GUID parsing, draws, filtering")
 print("=" * 60)
 
 # 1. Class instantiation and GUID extraction
@@ -89,5 +89,5 @@ except Exception as e:
     print(f"  Skipped (API call failed: {e})")
 
 print("\n" + "=" * 60)
-print("Phase 2: ALL TESTS PASSED")
+print("USTA Tournament Scraper: ALL TESTS PASSED")
 print("=" * 60)

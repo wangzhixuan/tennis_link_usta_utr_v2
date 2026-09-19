@@ -14,6 +14,11 @@ PROFILE_URL = "https://api.utrsports.net/v1/player/{utr_id}/profile"
 SESSION_URL = "https://app.utrsports.net"
 
 
+class UTRProfileNotFoundError(Exception):
+    """Raised or used when a UTR profile ID does not exist on UTR Sports (e.g. HTTP 404)."""
+    pass
+
+
 class UTRScraper:
     def __init__(self, email=UTR_USER, password=UTR_PASS, jwt=None):
         self.email = email
@@ -22,6 +27,8 @@ class UTRScraper:
         self.auth_token = None
         self._no_cred_warned = False
         self._jwt_cache = jwt
+        self.last_status_code: Optional[int] = None
+        self.last_profile_not_found: bool = False
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
@@ -88,9 +95,25 @@ class UTRScraper:
             self._jwt_cache = self._get_jwt()
         return self._jwt_cache
 
+    def check_profile_exists(self, utr_id: str) -> bool:
+        """Check whether a UTR profile ID exists on UTR Sports (returns False if 404)."""
+        if not utr_id or utr_id in ("N/A", "None", ""):
+            return False
+        try:
+            resp = self.session.get(PROFILE_URL.format(utr_id=utr_id), timeout=8)
+            return resp.status_code != 404
+        except Exception:
+            return True  # Network errors shouldn't be confused with 404
+
     def get_player_profile(self, utr_id: str, fallback_no_jwt=True) -> Optional[dict]:
         import time
         jwt = self._ensure_jwt()
+        self.last_status_code = None
+        self.last_profile_not_found = False
+
+        if not utr_id or utr_id in ("N/A", "None", ""):
+            self.last_profile_not_found = True
+            return None
 
         def _fetch(use_jwt):
             headers = {}
@@ -99,12 +122,25 @@ class UTRScraper:
             return self.session.get(PROFILE_URL.format(utr_id=utr_id), headers=headers, timeout=10)
 
         # Try with JWT first (precise ratings), fall back to no-JWT (integer-rounded)
-        resp = _fetch(use_jwt=True)
-        using_fallback = False
-        if resp.status_code == 429 and fallback_no_jwt:
-            logger.warning(f"Rate limited (429) on {utr_id}, falling back to no-JWT (approximate rating)")
-            resp = _fetch(use_jwt=False)
-            using_fallback = True
+        try:
+            resp = _fetch(use_jwt=True)
+            using_fallback = False
+            if resp.status_code == 429 and fallback_no_jwt:
+                logger.warning(f"Rate limited (429) on {utr_id}, falling back to no-JWT (approximate rating)")
+                resp = _fetch(use_jwt=False)
+                using_fallback = True
+        except Exception as e:
+            logger.warning(f"UTR profile request failed for {utr_id}: {e}")
+            return None
+
+        self.last_status_code = resp.status_code
+        if resp.status_code == 404:
+            self.last_profile_not_found = True
+            logger.warning(
+                f"UTR profile ID {utr_id} does not exist (HTTP 404). "
+                f"The user profile ID may have changed or been merged."
+            )
+            return None
 
         if resp.status_code != 200:
             logger.warning(f"UTR profile returned {resp.status_code} for {utr_id}")
@@ -112,9 +148,14 @@ class UTRScraper:
 
         try:
             data = resp.json()
+            if not data or not isinstance(data, dict) or data.get("error"):
+                self.last_profile_not_found = True
+                logger.warning(f"UTR profile for {utr_id} returned invalid/empty data.")
+                return None
+
             loc = data.get("location") or {}
             result = {
-                "utr_id": utr_id,
+                "utr_id": str(utr_id),
                 "name": data.get("displayName"),
                 "city": loc.get("cityName"),
                 "state": loc.get("stateAbbr") or loc.get("stateName"),
@@ -124,7 +165,7 @@ class UTRScraper:
                 "nationality": data.get("locationNationality"),
             }
             save_utr_player_profile(
-                utr_id=utr_id, name=result["name"],
+                utr_id=result["utr_id"], name=result["name"],
                 city=result["city"], state=result["state"],
                 utr_singles=result["utr_singles"],
                 utr_doubles=result["utr_doubles"],
@@ -133,8 +174,52 @@ class UTRScraper:
             logger.info(f"UTR profile: {result['name']} S={result['utr_singles']} D={result['utr_doubles']}{tag}")
             return result
         except Exception as e:
-            logger.warning(f"UTR profile parse error: {e}")
+            logger.warning(f"UTR profile parse error for {utr_id}: {e}")
             return None
+
+    def get_latest_player_rating(
+        self,
+        utr_id: str,
+        usta_player: dict = None,
+        matcher = None,
+        fallback_no_jwt: bool = True,
+    ) -> Optional[dict]:
+        """
+        Fetch the latest UTR profile/rating for utr_id.
+        If the profile returns 404 (user does not exist / ID changed) and usta_player + matcher
+        are provided, automatically triggers re-matching to find the new UTR ID.
+        """
+        profile = self.get_player_profile(utr_id, fallback_no_jwt=fallback_no_jwt)
+        if profile:
+            return profile
+
+        if self.last_profile_not_found and usta_player and matcher:
+            logger.warning(
+                f"UTR ID {utr_id} not found for player '{usta_player.get('name')}'. "
+                f"Auto-triggering search for updated UTR ID..."
+            )
+            new_match = matcher.rematch_player(usta_player, exclude_utr_ids={str(utr_id)})
+            if new_match and new_match.get("utr_id"):
+                new_utr_id = str(new_match["utr_id"])
+                logger.info(
+                    f"Auto-discovered new UTR ID {new_utr_id} for '{usta_player.get('name')}'. "
+                    f"Fetching latest rating..."
+                )
+                new_profile = self.get_player_profile(new_utr_id, fallback_no_jwt=fallback_no_jwt)
+                if new_profile:
+                    return new_profile
+                return {
+                    "utr_id": new_utr_id,
+                    "name": new_match.get("name"),
+                    "city": new_match.get("city"),
+                    "state": new_match.get("state"),
+                    "utr_singles": new_match.get("utr_singles"),
+                    "utr_doubles": new_match.get("utr_doubles"),
+                    "match_method": new_match.get("match_method"),
+                    "confidence": new_match.get("confidence"),
+                }
+
+        return None
 
     def _api_search(self, name: str, city: str = None, state: str = None) -> list:
         params = {"query": name, "top": 10}

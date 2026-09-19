@@ -421,11 +421,28 @@ if _trigger:
                 # If still no valid rating (or obfuscated integer), try API
                 if utr_singles is None or utr_singles == 0.0:
                     profile = utr.get_player_profile(utr_id)
+
+                    # UTR profile ID no longer exists -> automatically find the new ID
+                    if profile is None and utr.last_profile_not_found:
+                        status.write(f"⚠️ UTR ID {utr_id} for **{up['name']}** no longer exists — searching for updated ID...")
+                        new_match = matcher.rematch_player(
+                            up, usta_players,
+                            no_cross_ref=no_cross_ref,
+                            exclude_utr_ids={str(utr_id)},
+                        )
+                        if new_match and new_match.get("utr_id"):
+                            old_utr_id = utr_id
+                            utr_id = str(new_match["utr_id"])
+                            status.write(f"✅ New UTR ID found for **{up['name']}**: {old_utr_id} → {utr_id}")
+                            profile = utr.get_player_profile(utr_id)
+
                     if profile:
                         utr_singles = profile.get("utr_singles")
                         utr_doubles = profile.get("utr_doubles")
                         utr_ts = datetime.datetime.now().isoformat()
                         save_utr_player_history(utr_id, profile)
+                    elif utr.last_profile_not_found:
+                        status.write(f"⚠️ Could not find a replacement UTR profile for **{up['name']}**.")
 
             gender_display = "F" if player_gender in ("F", "FEMALE") else "M" if player_gender in ("M", "MALE") else ""
 
@@ -447,6 +464,7 @@ if _trigger:
 
         # If any players still have 0.0 (obfuscated) UTR, try fresh API call with JWT
         if utr_login_status:
+            usta_lookup = {p["usta_id"]: p for p in usta_players}
             for rec in resolved:
                 uid = rec["UTR ID"]
                 if uid in ("N/A", None, ""):
@@ -457,6 +475,20 @@ if _trigger:
                     val = None
                 if val is None or val == 0.0:
                     profile = utr.get_player_profile(uid)
+
+                    # Stale UTR ID -> auto re-match and update the record
+                    if profile is None and utr.last_profile_not_found:
+                        up_ref = usta_lookup.get(str(rec["USTA ID"]))
+                        if up_ref:
+                            new_match = matcher.rematch_player(
+                                up_ref, usta_players,
+                                no_cross_ref=no_cross_ref,
+                                exclude_utr_ids={str(uid)},
+                            )
+                            if new_match and new_match.get("utr_id"):
+                                rec["UTR ID"] = str(new_match["utr_id"])
+                                profile = utr.get_player_profile(rec["UTR ID"])
+
                     if profile and profile.get("utr_singles") is not None and profile["utr_singles"] != 0.0:
                         rec["UTR"] = profile["utr_singles"]
                         rec["UTR Updated"] = datetime.datetime.now().isoformat()
