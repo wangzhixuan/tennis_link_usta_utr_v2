@@ -1,6 +1,7 @@
 import re
 import os
 import csv
+import datetime
 import difflib
 import logging
 from typing import Optional
@@ -341,3 +342,133 @@ class PlayerMatcher:
             logger.warning(f"Could not find a replacement UTR profile for '{usta_player.get('name')}'.")
 
         return match
+
+    # ── Bootstrap: cross-source match correlation ──────────────────────────
+
+    @staticmethod
+    def _normalize_score(score) -> tuple:
+        """
+        Canonicalize a tennis score string into an order/orientation-insensitive key.
+        '6-3 6-2' -> ((3,6),(2,6)); tiebreak brackets are ignored. Returns () if unusable.
+        """
+        if not score:
+            return ()
+        s = str(score).lower()
+        s = re.sub(r"\[[^\]]*\]", " ", s)      # drop tiebreak brackets
+        s = re.sub(r"[^0-9\-\s]", " ", s)
+        sets = []
+        for tok in s.split():
+            m = re.match(r"(\d+)-(\d+)", tok)
+            if m:
+                sets.append(tuple(sorted((int(m.group(1)), int(m.group(2))))))
+        return tuple(sorted(sets))
+
+    @staticmethod
+    def _match_date(value) -> Optional[datetime.date]:
+        if not value:
+            return None
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})", str(value))
+        if m:
+            try:
+                return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                return None
+        return None
+
+    def pair_from_match_histories(
+        self,
+        usta_matches: list,
+        utr_matches: list,
+        usta_profile_by_id: dict = None,
+        utr_profile_by_id: dict = None,
+        name_threshold: float = 0.75,
+        date_tolerance_days: int = 1,
+        min_confidence: float = 0.85,
+        require_name_match: bool = True,
+    ) -> list:
+        """
+        Correlate a player's USTA match history with their UTR match history and emit
+        confident (usta_id, utr_id) opponent pairs.
+
+        A pair is only produced when the SAME physical match is found on both sides:
+        matching match date (± tolerance) AND matching score, with a reasonable opponent
+        name match. Opponent residence (city/state) is used to corroborate when available.
+        """
+        results = []
+        for um in usta_matches:
+            u_date = self._match_date(um.get("date"))
+            u_score = self._normalize_score(um.get("score"))
+            u_opp = um.get("opponent_usta_id")
+            if not u_date or not u_score or not u_opp:
+                continue
+
+            for tm in utr_matches:
+                t_opp = tm.get("opponent_utr_id")
+                if not t_opp:
+                    continue
+                t_date = self._match_date(tm.get("date"))
+                t_score = self._normalize_score(tm.get("score"))
+                if not t_date or t_score != u_score:
+                    continue
+                if abs((u_date - t_date).days) > date_tolerance_days:
+                    continue
+
+                name_sim = self.name_similarity(
+                    um.get("opponent_name") or "", tm.get("opponent_name") or ""
+                )
+
+                loc = None
+                if usta_profile_by_id or utr_profile_by_id:
+                    uc = (usta_profile_by_id or {}).get(str(u_opp), {})
+                    tc = (utr_profile_by_id or {}).get(str(t_opp), {})
+                    if uc or tc:
+                        loc = self.location_score(
+                            uc.get("city"), uc.get("state"), tc.get("city"), tc.get("state")
+                        )
+
+                if require_name_match and name_sim < name_threshold and (loc is None or loc < 0.75):
+                    continue
+
+                # Date+score already prove the same physical match; name/residence
+                # refine confidence in the opponent's *identity*.
+                if loc is not None:
+                    confidence = 0.7 + 0.15 * min(name_sim, 1.0) + 0.15 * loc
+                else:
+                    confidence = 0.7 + 0.3 * min(name_sim, 1.0)
+
+                if confidence < min_confidence:
+                    continue
+
+                results.append({
+                    "usta_id": str(u_opp),
+                    "utr_id": str(t_opp),
+                    "name": um.get("opponent_name") or tm.get("opponent_name"),
+                    "confidence": round(confidence, 3),
+                    "name_similarity": round(name_sim, 3),
+                    "location_score": loc,
+                    "date": u_date.isoformat(),
+                    "score": um.get("score"),
+                    "event": um.get("event"),
+                    "match_method": "match_history_date_score",
+                })
+
+        # Keep the best-scoring pair per USTA ID and per UTR ID (one-to-one).
+        by_pair = {}
+        for r in results:
+            key = (r["usta_id"], r["utr_id"])
+            if key not in by_pair or r["confidence"] > by_pair[key]["confidence"]:
+                by_pair[key] = r
+
+        by_usta = {}
+        for r in by_pair.values():
+            cur = by_usta.get(r["usta_id"])
+            if cur is None or r["confidence"] > cur["confidence"]:
+                by_usta[r["usta_id"]] = r
+
+        by_utr = {}
+        for r in by_usta.values():
+            cur = by_utr.get(r["utr_id"])
+            if cur is None or r["confidence"] > cur["confidence"]:
+                by_utr[r["utr_id"]] = r
+
+        return list(by_utr.values())

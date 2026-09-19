@@ -45,3 +45,10 @@ HEADLESS = os.getenv("HEADLESS", "true").lower() in ("true", "1", "yes")
 
 # Match settings
 GEO_THRESHOLD_MILES = 50.0  # Distance threshold for hometown/residence proximity matching
+
+# Mapping bootstrap (fresh clone starts with an empty player_mappings DB).
+# When fewer than BOOTSTRAP_MIN_PLAYERS mappings exist, the app offers to seed
+# the DB from a known USTA<->UTR pair and expand via match histories.
+BOOTSTRAP_MIN_PLAYERS = int(os.getenv("BOOTSTRAP_MIN_PLAYERS", "10"))
+BOOTSTRAP_MAX_PLAYERS = int(os.getenv("BOOTSTRAP_MAX_PLAYERS", "30"))
+BOOTSTRAP_MAX_DEPTH = int(os.getenv("BOOTSTRAP_MAX_DEPTH", "2"))

@@ -7,11 +7,13 @@ import datetime
 import pandas as pd
 import streamlit as st
 
-from scripts.config import UTR_USER, UTR_PASS, DB_PATH
+from scripts.config import (UTR_USER, UTR_PASS, DB_PATH,
+                            BOOTSTRAP_MIN_PLAYERS, BOOTSTRAP_MAX_PLAYERS, BOOTSTRAP_MAX_DEPTH)
 from scripts.usta_scraper import USTAScraper
 from scripts.utr_scraper import UTRScraper
 from scripts.matcher import PlayerMatcher
-from scripts.db import get_connection, save_mapping, save_usta_player_history, save_utr_player_history
+from scripts.db import (get_connection, save_mapping, save_usta_player_history,
+                        save_utr_player_history, count_mappings)
 
 st.set_page_config(page_title="TennisLink", layout="wide", initial_sidebar_state="expanded")
 
@@ -162,6 +164,158 @@ def _updated_today(iso_str) -> bool:
         return False
 
 
+# ── Mapping bootstrap ──────────────────────────────────────────────
+def render_bootstrap_tab():
+    """Bootstrap the mapping DB from a known pair (its own tab)."""
+    st.subheader("Bootstrap mapping DB")
+    try:
+        count = count_mappings()
+    except Exception:
+        count = 0
+    st.caption(f"Current mapping DB: **{count}** player(s).")
+
+    result = st.session_state.get("_bootstrap_result")
+    if result and result.get("ok"):
+        render_bootstrap_summary()
+        st.divider()
+
+    if count >= BOOTSTRAP_MIN_PLAYERS:
+        st.info(
+            f"Mapping DB already has {count} players (≥ {BOOTSTRAP_MIN_PLAYERS}). "
+            f"You can still seed an extra pair below."
+        )
+
+    st.markdown(
+        "Seed the DB from one **USTA ↔ UTR pair you already know**. TennisLink then "
+        "cross-checks each player's match history (date + score + opponent) to discover "
+        "more high-confidence pairs."
+    )
+    with st.expander("Seed from a known pair", expanded=True):
+        usta_ok = st.session_state._usta_login
+        utr_ok = st.session_state._utr_login
+        c1, c2, c3 = st.columns([1, 1, 2])
+        c1.markdown(f"**USTA:** {'✅' if usta_ok else '❌'}")
+        c2.markdown(f"**UTR:** {'✅' if utr_ok else '❌'}")
+        if st.button("🔍 Check logins", key="bs_check"):
+            with st.spinner("Checking USTA/UTR sessions..."):
+                st.session_state._usta_login = check_usta_login()
+                st.session_state._utr_login = check_utr_login()
+            st.rerun()
+
+        if not (usta_ok and utr_ok):
+            st.info("Bootstrap requires **both** USTA and UTR logins. Log in first.")
+            lg1, lg2 = st.columns(2)
+            if not usta_ok and lg1.button("🔑 Login USTA", key="bs_lg_usta", use_container_width=True):
+                open_login_browser("USTA")
+                st.session_state._usta_login = None
+                st.rerun()
+            if not utr_ok and lg2.button("🔑 Login UTR", key="bs_lg_utr", use_container_width=True):
+                open_login_browser("UTR")
+                st.session_state._utr_login = None
+                st.rerun()
+            return
+
+        st.caption("Enter a pair you already know (both numeric IDs).")
+        col_a, col_b = st.columns(2)
+        seed_usta = col_a.text_input("USTA ID", key="bs_usta_id", placeholder="e.g. 2018671404")
+        seed_utr = col_b.text_input("UTR ID", key="bs_utr_id", placeholder="e.g. 3639763")
+        mp_col, alert_col = st.columns([1, 2])
+        max_players = mp_col.number_input(
+            "Max players to collect (includes the seed; lower it for a quick test)",
+            min_value=2, max_value=99, value=min(BOOTSTRAP_MAX_PLAYERS, 99), step=1,
+            key="bs_max_players",
+            help="Keep this under 100 — too many requests may get you rate-limited or blocked by USTA/UTR.",
+        )
+        alert_col.warning(
+            "⚠️ Keep this **under 100**. Too many requests may get you blocked by USTA or UTR.",
+            icon="⚠️",
+        )
+
+        start = st.button("Start bootstrap", type="primary", key="bs_start", use_container_width=True)
+
+        if start:
+            if not (seed_usta.strip().isdigit() and seed_utr.strip().isdigit()):
+                st.error("Both USTA ID and UTR ID must be numeric.")
+                return
+            from scripts.bootstrap import bootstrap_from_seed
+            usta = USTAScraper()
+            utr = UTRScraper()
+            status = st.status("Bootstrapping mapping DB...", expanded=True)
+            if not usta.check_usta_token():
+                status.update(label="USTA token unavailable", state="error")
+                st.error("Could not find a valid USTA match-API token. Please (re)login to USTA.")
+                return
+            if not utr._ensure_jwt():
+                status.update(label="UTR login required", state="error")
+                st.error("No UTR JWT available. Please login to UTR.")
+                return
+            result = bootstrap_from_seed(
+                seed_usta.strip(), seed_utr.strip(),
+                max_players=int(max_players),
+                progress_cb=status.write, usta=usta, utr=utr,
+            )
+            if not result["ok"]:
+                status.update(label="Bootstrap failed", state="error")
+                st.error(result["error"])
+            else:
+                status.update(label=f"Bootstrap complete — {result['added']} players mapped",
+                              state="complete", expanded=False)
+                st.session_state._bootstrap_done = True
+                st.session_state._bootstrap_result = result
+                st.rerun()
+
+
+def render_bootstrap_summary():
+    """Show what the last bootstrap collected (persists for the session)."""
+    result = st.session_state.get("_bootstrap_result")
+    if not result or not result.get("ok"):
+        return
+    players = result.get("players", [])
+    st.success(
+        f"Mapping DB bootstrapped — **{result['added']}** players mapped "
+        f"over {result['depth']} layer(s)."
+    )
+    if players:
+        rows = [{
+            "Player": p.get("name"),
+            "USTA ID": p.get("usta_id"),
+            "UTR ID": p.get("utr_id"),
+            "Confidence": p.get("confidence"),
+            "Method": p.get("match_method"),
+        } for p in players]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption("Bad pairs can be fixed later via **Report Wrong Mapping** after a tournament run.")
+
+
+def render_user_guide():
+    """Default main content shown before any tournament has been run."""
+    st.subheader("How to use TennisLink")
+    st.markdown(
+        """
+TennisLink pulls a **USTA tournament draw** and enriches each player with their
+**WTN / ranking points** and **UTR rating**, then shows the combined table.
+
+1. **Check logins** (sidebar → *Login Status* → **Check Login Status**). Log in to both
+   **USTA** and **UTR**; both are required for complete data and for bootstrapping.
+2. **Enter a tournament** — paste a USTA TennisLink tournament **URL or GUID** in the sidebar
+   (e.g. `2506261054211502`).
+3. **Pick a division** (optional) — the dropdown fills from the tournament's events
+   (e.g. `Boys 18`). Leave it on *All divisions* for everyone.
+4. **Run** — click **Run**. USTA profiles and UTR ratings are fetched and cached locally.
+5. **Read the table** — `WTN` is the USTA World Tennis Number; the ranking column shows points
+   in the selected list; `UTR` is the matched Universal Tennis Rating, with a link to each profile.
+6. **Refresh All** — re-fetch only players profiled before today.
+7. **Report Wrong Mapping** — fix an incorrect USTA→UTR link; your correction is authoritative.
+8. **Download** — export the results as **TSV** or **Excel** from the toolbar.
+
+> **Fresh install?** If the mapping DB is nearly empty, a **Bootstrap mapping DB** panel appears
+> above. Enter one USTA↔UTR pair you already know and TennisLink will cross-check match histories
+> (date + score + opponent) to build a starter mapping DB.
+"""
+    )
+
+
+
 # ── Session state ──────────────────────────────────────────────────
 if "last_run" not in st.session_state:
     st.session_state.last_run = None
@@ -179,6 +333,12 @@ if "_run_pending" not in st.session_state:
     st.session_state._run_pending = False
 if "_saved_inputs" not in st.session_state:
     st.session_state._saved_inputs = {}
+if "_bootstrap_skip" not in st.session_state:
+    st.session_state._bootstrap_skip = False
+if "_bootstrap_done" not in st.session_state:
+    st.session_state._bootstrap_done = False
+if "_bootstrap_result" not in st.session_state:
+    st.session_state._bootstrap_result = None
 
 # ── Auto-check login status on startup ──
 if not st.session_state._login_checked:
@@ -270,6 +430,12 @@ if st.session_state.sidebar_open:
         visible = st.checkbox("Visible browser", value=False)
 
         run = st.button("Run", type="primary", use_container_width=True)
+
+        st.divider()
+        try:
+            st.caption(f"Mapping DB: {count_mappings()} player(s)")
+        except Exception:
+            pass
 
 # Save sidebar inputs for auto-rerun
 if run or st.session_state._run_pending:
@@ -522,14 +688,43 @@ if _trigger:
             "usta_ids": df["USTA ID"].tolist(),
             "ranking_label": ranking_list_label,
         }
+        st.session_state._active_tab = "🎾 Tournament Players"
         st.rerun()
 
     except Exception as e:
         status.update(label="Error", state="error")
         st.exception(e)
 
+# ── Main tabs ───────────────────────────────────────────────────────
+TAB_GUIDE = "📖 User Guide"
+TAB_TOURNAMENT = "🎾 Tournament Players"
+TAB_BOOTSTRAP = "🧩 Bootstrap Pairs"
+_TABS = [TAB_GUIDE, TAB_TOURNAMENT, TAB_BOOTSTRAP]
+
+try:
+    _mapping_count = count_mappings()
+except Exception:
+    _mapping_count = 0
+
+if "_active_tab" not in st.session_state or st.session_state._active_tab not in _TABS:
+    st.session_state._active_tab = (
+        TAB_BOOTSTRAP
+        if (_mapping_count < BOOTSTRAP_MIN_PLAYERS and not st.session_state._bootstrap_done)
+        else TAB_GUIDE
+    )
+
+st.session_state._active_tab = st.radio(
+    "Navigation", _TABS,
+    index=_TABS.index(st.session_state._active_tab),
+    horizontal=True, label_visibility="collapsed",
+)
+
 # ── Display results ─────────────────────────────────────────────────
-if st.session_state.last_run is not None:
+if st.session_state._active_tab == TAB_GUIDE:
+    render_user_guide()
+elif st.session_state._active_tab == TAB_BOOTSTRAP:
+    render_bootstrap_tab()
+elif st.session_state.last_run is not None:
     df = st.session_state.last_run["df"]
     fname = st.session_state.last_run["fname"]
     out_path = st.session_state.last_run["out_path"]
@@ -668,3 +863,9 @@ if st.session_state.last_run is not None:
                 st.error(f"Failed to apply correction: {ex}")
 
     st.info(f"Report saved to `{out_path}`")
+
+else:
+    st.info(
+        "No tournament loaded yet. Open the sidebar, paste a USTA tournament URL/GUID, "
+        "then click **Run**."
+    )

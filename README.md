@@ -29,8 +29,9 @@ scripts/
   config.py            .env-driven configuration
   db.py                SQLite schema + cache accessors
   matcher.py           USTA -> UTR matching heuristics + golden mapping loader
-  usta_scraper.py      USTA TennisLink scraper
+  usta_scraper.py      USTA TennisLink scraper (+ playhistory match API)
   utr_scraper.py       UTR API scraper (JWT-first, no-JWT fallback)
+  bootstrap.py         Seed/expand the USTA<->UTR mapping DB from one known pair
 tests/test_*.py        Standalone (script-style) tests, run directly
 ```
 
@@ -116,6 +117,10 @@ In the browser:
 4. Use **Report Wrong Mapping** to fix any bad USTA→UTR links.
 5. **Refresh All** re-fetches USTA/UTR data only for players updated before today.
 
+The main area is split into three tabs: **📖 User Guide** (default), **🎾 Tournament Players**
+(the results table), and **🧩 Bootstrap Pairs** (auto-selected when the mapping DB has fewer
+than `BOOTSTRAP_MIN_PLAYERS` players).
+
 ### CLI (single tournament)
 
 ```sh
@@ -136,6 +141,37 @@ python monitor.py        # in a second terminal to watch progress
 
 `launch_batch.py` launches it detached from Windows Explorer / a terminal.
 
+## Bootstrapping the mapping DB (fresh clone)
+
+The golden mapping CSV is **personal data and is not shared**, so a fresh clone starts with an
+empty `player_mappings` table and matching is weak. The app detects this (fewer than
+`BOOTSTRAP_MIN_PLAYERS` mappings) and shows a **Bootstrap mapping DB** panel. Give it **one
+pair you already know** — a player's USTA ID and UTR ID — and it will:
+
+1. Validate that both profiles exist and look like the same person.
+2. Compare that player's match history on **both** sides, pairing the *same* physical match by
+   **date + score + opponent name/residence**, and save the confident USTA↔UTR pairs.
+3. Expand over a couple of layers to build a starter DB of ~`BOOTSTRAP_MAX_PLAYERS` players.
+
+Both **USTA** and **UTR** must be logged in first (the panel shows the status and login buttons;
+bootstrap is disabled until both are green). Match correlation only auto-saves high-confidence
+pairs; everything is reviewable/correctable later via **Report Wrong Mapping**.
+
+### Manual test on a scratch DB
+
+Same engine from the CLI, without the UI. `--reset` wipes the target DB first so you start empty
+(it refuses to wipe the default DB unless `--force`):
+
+```sh
+python -m scripts.bootstrap --usta <USTA_ID> --utr <UTR_ID> --db %TEMP%\bootstrap_test.db --reset --max-players 20
+```
+
+(`--max-players` includes the seed pair, so `20` collects the seed + up to 19 discovered pairs —
+handy for a quick limited test. It also respects `--max-depth`.)
+
+Relevant `.env` knobs: `BOOTSTRAP_MIN_PLAYERS` (default 10), `BOOTSTRAP_MAX_PLAYERS` (30),
+`BOOTSTRAP_MAX_DEPTH` (2).
+
 ## Running the tests
 
 The tests are plain scripts (no pytest needed):
@@ -149,6 +185,7 @@ python tests/test_cli_and_reporting.py       # CLI args, Excel formatting, full 
 python tests/test_usta_profile_rankings.py   # USTA profile/WTN/ranking fetch + persistence
 python tests/test_utr_api_live.py            # live UTR API + response edge cases
 python tests/test_utr_id_recovery.py         # auto-recovery when a UTR ID changes/disappears
+python tests/test_bootstrap.py               # mapping bootstrap + date/score correlation
 ```
 
 Note: tests use the project's SQLite DB and may recreate/clear it. Run them on a scratch

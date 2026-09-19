@@ -317,4 +317,32 @@ def get_all_cache(table_name):
         return [dict(r) for r in rows]
 
 
+def count_mappings() -> int:
+    with get_connection() as conn:
+        return conn.execute("SELECT COUNT(*) FROM player_mappings").fetchone()[0]
+
+
+def get_all_mappings() -> list:
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM player_mappings").fetchall()
+        return [dict(r) for r in rows]
+
+
+def reset_all():
+    """Delete every row from every table. Intended for scratch/bootstrap DBs only."""
+    tables = (
+        "player_mappings",
+        "usta_player_rankings",
+        "usta_player_history",
+        "usta_player_profiles",
+        "utr_player_history",
+        "utr_player_profiles",
+    )
+    with get_connection() as conn:
+        for t in tables:
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+
+
+
 init_db()

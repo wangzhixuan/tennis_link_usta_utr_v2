@@ -283,7 +283,26 @@ class UTRScraper:
             logger.debug(f"JWT extraction error: {e}")
         return None
 
-    def get_player_matches(self, utr_id: str) -> list:
+    @staticmethod
+    def _utr_score_text(res: dict) -> Optional[str]:
+        """Format a UTR result's per-set scores from the profile owner's perspective."""
+        score = res.get("score") or {}
+        is_winner = bool(res.get("isWinner"))
+        sets = []
+        for key in sorted(score.keys(), key=lambda k: int(k)):
+            s = score.get(key) or {}
+            w, l = s.get("winner"), s.get("loser")
+            if (w is None and l is None) or (w == 0 and l == 0):
+                continue
+            owner, opp = (w, l) if is_winner else (l, w)
+            sets.append(f"{owner}-{opp}")
+        return " ".join(sets) if sets else None
+
+    def get_player_match_history(self, utr_id: str) -> list:
+        """
+        Return every singles match in a player's UTR history (one entry per match/opponent),
+        including date, score and outcome for cross-source match correlation.
+        """
         jwt = self._ensure_jwt()
         if not jwt:
             logger.warning("No JWT available for UTR match history API.")
@@ -305,22 +324,23 @@ class UTRScraper:
 
             data = resp.json()
             events = data.get("events", [])
-            opponents = []
+            entries = []
 
             for ev in events:
+                event_name = ev.get("name")
                 match_results = ev.get("results", [])
                 if not match_results:
                     for draw in ev.get("draws", []):
                         match_results.extend(draw.get("results", []))
                 for res in match_results:
-                    players = res.get("players", {})
+                    players = res.get("players") or {}
                     for side_key, player in players.items():
                         if not player or not player.get("id"):
                             continue
                         pid = str(player["id"])
                         if pid == utr_id:
                             continue
-                        opponents.append({
+                        entries.append({
                             "opponent_utr_id": pid,
                             "opponent_name": f"{player.get('lastName', '')}, {player.get('firstName', '')}".strip(", "),
                             "opponent_first": player.get("firstName", ""),
@@ -328,19 +348,31 @@ class UTRScraper:
                             "singles_utr": player.get("singlesUtr"),
                             "gender": player.get("gender"),
                             "side": side_key,
+                            "nationality": player.get("nationality"),
+                            "date": res.get("date"),
+                            "score": self._utr_score_text(res),
+                            "win": res.get("isWinner"),
+                            "outcome": res.get("outcome"),
+                            "event": event_name,
+                            "draw": (res.get("draw") or {}).get("name"),
+                            "match_id": res.get("id"),
                         })
 
-            logger.info(f"Found {len(opponents)} opponent entries for UTR ID {utr_id}")
-            seen = set()
-            unique = []
-            for o in opponents:
-                if o["opponent_utr_id"] not in seen:
-                    seen.add(o["opponent_utr_id"])
-                    unique.append(o)
-            return unique
+            logger.info(f"Found {len(entries)} match entries for UTR ID {utr_id}")
+            return entries
         except Exception as e:
             logger.debug(f"Match history error: {e}")
             return []
+
+    def get_player_matches(self, utr_id: str) -> list:
+        """Return a de-duplicated list of opponents (one entry per opponent)."""
+        seen = set()
+        unique = []
+        for o in self.get_player_match_history(utr_id):
+            if o["opponent_utr_id"] not in seen:
+                seen.add(o["opponent_utr_id"])
+                unique.append(o)
+        return unique
 
 
 if __name__ == "__main__":

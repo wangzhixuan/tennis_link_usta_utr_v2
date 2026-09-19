@@ -1,5 +1,7 @@
 import re
 import json
+import time
+import base64
 import logging
 import requests
 from typing import Optional
@@ -13,6 +15,7 @@ logger = logging.getLogger(__name__)
 PARTICIPANT_ENDPOINT = "https://prd-usta-kube-tournamentdesk-public-api.clubspark.pro/"
 TOURNAMENT_ENDPOINT = "https://prd-usta-kube-tournaments.clubspark.pro/"
 PROFILE_URL = "https://www.usta.com/en/home/play/player-search/profile.html#?uaid={usta_id}"
+PLAYHISTORY_URL = "https://services.usta.com/v1/dataexchange/playhistory"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -95,6 +98,148 @@ query GetTournament($id: UUID!, $previewMode: Boolean) {
 class USTAScraper:
     def __init__(self):
         self.session = requests.Session()
+        self._usta_token = None
+        self._usta_token_exp = 0
+
+    @staticmethod
+    def _jwt_exp(token: str) -> int:
+        """Return the 'exp' (unix seconds) from a JWT, or 0 if it can't be read."""
+        try:
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            data = json.loads(base64.urlsafe_b64decode(payload))
+            return int(data.get("exp") or 0)
+        except Exception:
+            return 0
+
+    def _get_usta_bearer_token(self, force: bool = False) -> Optional[str]:
+        """
+        Extract the USTA customer bearer token (used by the playhistory API) from the
+        persistent Playwright profile's localStorage. Cached until ~2 min before expiry.
+        """
+        if not force and self._usta_token and self._usta_token_exp - 120 > time.time():
+            return self._usta_token
+
+        token = None
+        try:
+            with sync_playwright() as p:
+                context = p.chromium.launch_persistent_context(PLAYWRIGHT_USER_DIR, headless=True)
+                try:
+                    page = context.pages[0] if context.pages else context.new_page()
+                    page.goto("https://www.usta.com/", wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(2500)
+                    token = page.evaluate(
+                        """() => {
+                            for (let i = 0; i < localStorage.length; i++) {
+                                const k = localStorage.key(i);
+                                if (k && k.startsWith('access_token_')) {
+                                    return localStorage.getItem(k);
+                                }
+                            }
+                            return null;
+                        }"""
+                    )
+                finally:
+                    context.close()
+        except Exception as e:
+            logger.warning(f"USTA token extraction failed: {e}")
+            return None
+
+        if not token:
+            logger.warning("No USTA access token found in the browser profile (not logged in?).")
+            return None
+
+        self._usta_token = token
+        self._usta_token_exp = self._jwt_exp(token) or (int(time.time()) + 3600)
+        logger.info("USTA bearer token acquired.")
+        return token
+
+    def check_usta_token(self) -> bool:
+        """Return True if a usable (non-expired) USTA customer token is available."""
+        token = self._get_usta_bearer_token()
+        if not token:
+            return False
+        if self._usta_token_exp and self._usta_token_exp - 30 < time.time():
+            token = self._get_usta_bearer_token(force=True)
+            return bool(token)
+        return True
+
+    def get_player_matches(
+        self,
+        usta_id: str,
+        event_type: str = "ALL",
+        year: str = "all",
+        page_size: int = 50,
+    ) -> list:
+        """
+        Fetch a player's match history from the USTA playhistory API.
+
+        Returns a list of opponent/match dicts:
+          {opponent_usta_id, opponent_name, date, score, win, outcome,
+           event, division, match_format, round}
+        """
+        token = self._get_usta_bearer_token()
+        if not token:
+            return []
+
+        payload = {
+            "selection": {"uaid": str(usta_id), "eventType": event_type, "year": year},
+            "pagination": {"pageSize": page_size, "currentPage": 1},
+        }
+
+        def _post(tok):
+            headers = {
+                "Authorization": f"Bearer {tok}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "User-Agent": HEADERS["User-Agent"],
+            }
+            return self.session.post(PLAYHISTORY_URL, headers=headers, json=payload, timeout=20)
+
+        try:
+            resp = _post(token)
+            if resp.status_code == 401:
+                logger.warning("USTA token rejected (401); refreshing and retrying...")
+                token = self._get_usta_bearer_token(force=True)
+                if not token:
+                    return []
+                resp = _post(token)
+            if resp.status_code != 200:
+                logger.warning(f"USTA playhistory returned {resp.status_code} for {usta_id}")
+                return []
+            data = resp.json()
+        except Exception as e:
+            logger.warning(f"USTA playhistory request failed for {usta_id}: {e}")
+            return []
+
+        matches = []
+        for ev in data.get("events") or []:
+            event_name = ev.get("name")
+            division = ev.get("division")
+            match_format = ev.get("matchFormat")
+            for rnd in ev.get("rounds") or []:
+                score = rnd.get("results")
+                outcome = rnd.get("outcome")
+                date = rnd.get("matchDate")
+                for opp in rnd.get("opponents") or []:
+                    uid = opp.get("uaid")
+                    if not uid:
+                        continue
+                    matches.append({
+                        "opponent_usta_id": str(uid),
+                        "opponent_name": opp.get("name"),
+                        "date": date,
+                        "score": score,
+                        "win": outcome == "W",
+                        "outcome": outcome,
+                        "event": event_name,
+                        "division": division,
+                        "match_format": match_format,
+                        "round": rnd.get("roundName"),
+                    })
+
+        logger.info(f"USTA playhistory: {len(matches)} match entries for {usta_id}")
+        return matches
 
     @staticmethod
     def extract_guid(url_or_id: str) -> str:
