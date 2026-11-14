@@ -1,6 +1,7 @@
 import re
 import os
 import csv
+import math
 import datetime
 import difflib
 import logging
@@ -29,6 +30,15 @@ STATE_ABBREV = {
 }
 
 NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+# Empirical WTN -> UTR relationship, fit from local mapping data (n≈1478):
+#   UTR ≈ 16.845 - 0.3956 * WTN, residual sd ≈ 0.96
+# WTN is lower-is-better, UTR higher-is-better. We use a slightly forgiving
+# residual sd and a Gaussian likelihood to sanity-check candidate pairs.
+WTN_UTR_INTERCEPT = 16.845
+WTN_UTR_SLOPE = -0.3956
+WTN_UTR_RESID_SD = 1.1
+RATING_MIN_COMPATIBILITY = 0.05  # below this a WTN/UTR pair is considered implausible
 
 
 class PlayerMatcher:
@@ -112,6 +122,27 @@ class PlayerMatcher:
 
         return 0.75
 
+    @staticmethod
+    def rating_compatibility(wtn, utr) -> Optional[float]:
+        """
+        Likelihood (0..1) that a UTR rating is consistent with a WTN rating.
+
+        Uses the empirical mapping UTR ≈ 16.845 - 0.3956*WTN with a Gaussian
+        residual model. Returns None when either rating is missing/zero so the
+        check is simply skipped rather than penalising unknown players.
+        """
+        try:
+            wtn = float(wtn)
+            utr = float(utr)
+        except (TypeError, ValueError):
+            return None
+        if wtn <= 0 or utr <= 0:
+            return None
+        expected = WTN_UTR_INTERCEPT + WTN_UTR_SLOPE * wtn
+        expected = max(1.0, min(16.5, expected))
+        z = (utr - expected) / WTN_UTR_RESID_SD
+        return math.exp(-0.5 * z * z)
+
     def find_utr_profile(
         self,
         usta_player: dict,
@@ -194,20 +225,36 @@ class PlayerMatcher:
             if name_sim < 0.6:
                 # Name is too different, skip this candidate
                 continue
-                
-            # 2. Location match score
+
+            # 2. Rating plausibility: does this UTR make sense for the player's WTN?
+            rating_score = self.rating_compatibility(
+                usta_player.get("wtn_singles"), cand.get("utr_singles")
+            )
+            if rating_score is not None and rating_score < RATING_MIN_COMPATIBILITY:
+                logger.info(
+                    f"Skipping {cand.get('name')} for {usta_name}: UTR {cand.get('utr_singles')} "
+                    f"implausible for WTN {usta_player.get('wtn_singles')} "
+                    f"(compatibility={rating_score:.3f})"
+                )
+                continue
+
+            # 3. Location match score
             loc_score = self.location_score(
                 hometown_city, hometown_state,
                 cand.get("city"), cand.get("state")
             )
             
-            # Base confidence combines name similarity and location score
+            # Base confidence combines name similarity and location score, damped
+            # when the WTN/UTR ratings disagree.
             confidence = (name_sim * 0.6) + (loc_score * 0.4)
-            
+            if rating_score is not None:
+                confidence *= (0.7 + 0.3 * rating_score)
+
             scored_candidates.append({
                 "candidate": cand,
                 "base_confidence": confidence,
                 "confidence": confidence,
+                "rating_compatibility": rating_score,
                 "match_method": "name_geo"
             })
 
@@ -417,14 +464,20 @@ class PlayerMatcher:
                     um.get("opponent_name") or "", tm.get("opponent_name") or ""
                 )
 
+                uc = (usta_profile_by_id or {}).get(str(u_opp), {}) if usta_profile_by_id else {}
+                tc = (utr_profile_by_id or {}).get(str(t_opp), {}) if utr_profile_by_id else {}
+
                 loc = None
-                if usta_profile_by_id or utr_profile_by_id:
-                    uc = (usta_profile_by_id or {}).get(str(u_opp), {})
-                    tc = (utr_profile_by_id or {}).get(str(t_opp), {})
-                    if uc or tc:
-                        loc = self.location_score(
-                            uc.get("city"), uc.get("state"), tc.get("city"), tc.get("state")
-                        )
+                if uc or tc:
+                    loc = self.location_score(
+                        uc.get("city"), uc.get("state"), tc.get("city"), tc.get("state")
+                    )
+
+                rating_score = self.rating_compatibility(
+                    uc.get("wtn_singles"), tc.get("utr_singles")
+                )
+                if rating_score is not None and rating_score < RATING_MIN_COMPATIBILITY:
+                    continue
 
                 if require_name_match and name_sim < name_threshold and (loc is None or loc < 0.75):
                     continue
@@ -435,6 +488,8 @@ class PlayerMatcher:
                     confidence = 0.7 + 0.15 * min(name_sim, 1.0) + 0.15 * loc
                 else:
                     confidence = 0.7 + 0.3 * min(name_sim, 1.0)
+                if rating_score is not None:
+                    confidence *= (0.7 + 0.3 * rating_score)
 
                 if confidence < min_confidence:
                     continue
@@ -446,6 +501,7 @@ class PlayerMatcher:
                     "confidence": round(confidence, 3),
                     "name_similarity": round(name_sim, 3),
                     "location_score": loc,
+                    "rating_compatibility": (round(rating_score, 3) if rating_score is not None else None),
                     "date": u_date.isoformat(),
                     "score": um.get("score"),
                     "event": um.get("event"),

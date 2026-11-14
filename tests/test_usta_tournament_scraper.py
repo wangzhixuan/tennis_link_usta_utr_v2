@@ -9,7 +9,7 @@ print("USTA Tournament Scraper: GUID parsing, draws, filtering")
 print("=" * 60)
 
 # 1. Class instantiation and GUID extraction
-print("\n[1/4] Testing GUID extraction...")
+print("\n[1/5] Testing GUID extraction...")
 from scripts.usta_scraper import USTAScraper
 scraper = USTAScraper()
 
@@ -30,7 +30,7 @@ except ValueError:
 print("  PASSED")
 
 # 2. Test parse_players with real data
-print("\n[2/4] Testing player parsing from API data...")
+print("\n[2/5] Testing player parsing from API data...")
 data_path = os.path.join(os.path.dirname(__file__), "..", "usta_graphql_participants.json")
 with open(data_path) as f:
     data = json.load(f)
@@ -51,7 +51,7 @@ print(f"  Sample: {p['name']:25s} | {p.get('city',''):15s} {p.get('state',''):2s
 print("  PASSED")
 
 # 3. Test division filtering
-print("\n[3/4] Testing division/event filtering...")
+print("\n[3/5] Testing division/event filtering...")
 from scripts.usta_scraper import USTAScraper
 events_path = os.path.join(os.path.dirname(__file__), "..", "usta_tournament_full.json")
 if os.path.exists(events_path):
@@ -78,7 +78,7 @@ else:
 print("  PASSED")
 
 # 4. Test real API call (if Tournament ID env var set)
-print("\n[4/4] Testing real API call (optional)...")
+print("\n[4/5] Testing real API call (optional)...")
 test_guid = os.environ.get("TEST_TOURNAMENT_GUID", "D6F0B896-6620-4052-B6C4-3ABBAE1C5A8B")
 try:
     real_players = scraper.scrape_tournament(test_guid)
@@ -87,6 +87,48 @@ try:
     print("  PASSED")
 except Exception as e:
     print(f"  Skipped (API call failed: {e})")
+
+print("\n[5/5] Testing entry status mapping...")
+assert USTAScraper._derive_status([{"entryStatus": "DIRECT_ACCEPTANCE"}]) == "Accepted"
+assert USTAScraper._derive_status([{"entryStatus": "ALTERNATE"}]) == "Alternate"
+assert USTAScraper._derive_status([{"entryStatus": "WITHDRAWN"}]) == "Withdrawn"
+assert USTAScraper._derive_status(
+    [{"entryStatus": "WITHDRAWN"}, {"entryStatus": "DIRECT_ACCEPTANCE"}]) == "Accepted"
+assert USTAScraper._derive_status([{"entryStage": "MAIN"}]) == "Accepted"
+assert USTAScraper._derive_status([]) is None
+
+synthetic = [
+    {
+        "participantName": "Accepted Player",
+        "person": {"addresses": [{"city": "A", "state": "CA"}],
+                   "personOtherIds": [{"personId": "1", "uniqueOrganisationName": "USTA"}]},
+        "events": [{"eventId": "E1", "entryStatus": "DIRECT_ACCEPTANCE"}],
+    },
+    {
+        "participantName": "Alt Player",
+        "person": {"addresses": [{"city": "B", "state": "CA"}],
+                   "personOtherIds": [{"personId": "2", "uniqueOrganisationName": "USTA"}]},
+        "events": [{"eventId": "E1", "entryStatus": "ALTERNATE"}],
+    },
+    {
+        "participantName": "Withdrawn Player",
+        "person": {"addresses": [{"city": "C", "state": "CA"}],
+                   "personOtherIds": [{"personId": "3", "uniqueOrganisationName": "USTA"}]},
+        "events": [{"eventId": "E1", "entryStatus": "WITHDRAWN"}],
+    },
+    {
+        "participantName": "Other Event",
+        "person": {"addresses": [{"city": "D", "state": "CA"}],
+                   "personOtherIds": [{"personId": "4", "uniqueOrganisationName": "USTA"}]},
+        "events": [{"eventId": "E2", "entryStatus": "DIRECT_ACCEPTANCE"}],
+    },
+]
+parsed = {p["usta_id"]: p for p in USTAScraper.parse_players(synthetic, {"E1"})}
+assert parsed["1"]["status"] == "Accepted"
+assert parsed["2"]["status"] == "Alternate"
+assert parsed["3"]["status"] == "Withdrawn"
+assert "4" not in parsed, "Player from another event should be filtered out"
+print("  PASSED")
 
 print("\n" + "=" * 60)
 print("USTA Tournament Scraper: ALL TESTS PASSED")

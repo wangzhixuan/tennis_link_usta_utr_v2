@@ -68,7 +68,7 @@ query getTournamentParticipants($tournamentId: ID!) {
       standardGivenName
       standardFamilyName
     }
-    events { eventId entryStage }
+    events { eventId entryStage entryStatus entryPosition }
   }
 }
 """
@@ -312,6 +312,30 @@ class USTAScraper:
         return items
 
     @staticmethod
+    def _derive_status(events: list) -> Optional[str]:
+        """
+        Map USTA entry statuses to a friendly tournament status.
+
+        DIRECT_ACCEPTANCE -> Accepted (main draw), ALTERNATE -> Alternate,
+        WITHDRAWN -> Withdrawn. A player entered in several events is Accepted
+        if accepted in any, else Alternate, else Withdrawn.
+        """
+        events = events or []
+        statuses = {str(e.get("entryStatus") or "").upper() for e in events}
+        statuses.discard("")
+        if "DIRECT_ACCEPTANCE" in statuses:
+            return "Accepted"
+        if "ALTERNATE" in statuses:
+            return "Alternate"
+        if "WITHDRAWN" in statuses:
+            return "Withdrawn"
+        if statuses:
+            return sorted(statuses)[0].replace("_", " ").title()
+        if any(str(e.get("entryStage") or "").upper() == "MAIN" for e in events):
+            return "Accepted"
+        return None
+
+    @staticmethod
     def parse_venue_players(items: list, target_event_ids: set = None) -> list:
         players = {}
         for item in items:
@@ -339,6 +363,7 @@ class USTAScraper:
                     "name": name,
                     "city": item.get("city"),
                     "state": item.get("state"),
+                    "status": USTAScraper._derive_status(item.get("events") or []),
                     "wtn_singles": None,
                     "wtn_doubles": None,
                     "ranking": None
@@ -382,10 +407,17 @@ class USTAScraper:
             city = addresses[0].get("city") if addresses else None
             state = addresses[0].get("state") if addresses else None
 
-            player_event_ids = {e["eventId"] for e in p.get("events", []) if e.get("eventId")}
+            events = p.get("events") or []
+            player_event_ids = {e.get("eventId") for e in events if e.get("eventId")}
 
             if target_event_ids and not player_event_ids.intersection(target_event_ids):
                 continue
+
+            relevant_events = [
+                e for e in events
+                if not target_event_ids or e.get("eventId") in target_event_ids
+            ]
+            status = USTAScraper._derive_status(relevant_events)
 
             if usta_id not in players:
                 players[usta_id] = {
@@ -393,6 +425,7 @@ class USTAScraper:
                     "name": name,
                     "city": city,
                     "state": state,
+                    "status": status,
                     "wtn_singles": None,
                     "wtn_doubles": None,
                     "ranking": None
@@ -641,6 +674,8 @@ class USTAScraper:
                 try:
                     profile = self.fetch_player_profile(p["usta_id"], headless=headless, browser=browser)
                     if profile:
+                        # Preserve the tournament entry status (not part of the profile API)
+                        profile["status"] = p.get("status", profile.get("status"))
                         results.append(profile)
                 except Exception as e:
                     logger.warning(f"Failed to fetch profile for {p['usta_id']}: {e}")

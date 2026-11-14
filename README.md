@@ -15,6 +15,8 @@ a Streamlit web app. Reports export to `data/tournaments/*.tsv`.
 - **Auto-recovers changed UTR IDs**: if a stored UTR profile no longer exists (HTTP 404 —
   the ID changed, was merged, or removed), it searches for the player's new UTR ID,
   updates the mapping, and fetches the fresh rating automatically.
+- **WTN↔UTR sanity check**: candidate UTR ratings are validated against the player's WTN
+  using an empirical WTN→UTR mapping; implausible pairs (e.g. UTR 6.5 for WTN 34) are rejected.
 - Caches everything in SQLite (`tennislink.db`) so re-runs are fast and offline-safe.
 
 ## Project layout
@@ -97,7 +99,7 @@ GOLDEN_MAPPING_PATH=            # default: <parent>/Tennis/data/usta_to_utr_id_m
 The SQLite DB is created **automatically** on first import, so you can sanity-check now:
 
 ```sh
-python -c "import db; db.init_db(); print('DB ready:', db.DB_PATH)"
+python -c "from scripts import db; db.init_db(); print('DB ready:', db.DB_PATH)"
 ```
 
 ## Running
@@ -114,8 +116,14 @@ In the browser:
    a browser window opens and stays logged in for later sessions).
 2. Paste a tournament URL or GUID (e.g. `2506261054211502`).
 3. Pick a division, then **Run Tournament** to fill the table.
+   Detailed USTA profiles (WTN/rankings) are refreshed for the players in the selected
+   event, except those already pulled earlier the same day (reused from cache); enable
+   *Skip detailed profiles* to use cached values only.
 4. Use **Report Wrong Mapping** to fix any bad USTA→UTR links.
 5. **Refresh All** re-fetches USTA/UTR data only for players updated before today.
+
+The results table (and TSV/Excel export) includes each player's tournament **Status**
+(`Accepted`, `Alternate`, or `Withdrawn`), derived from USTA's registration entry status.
 
 The main area is split into three tabs: **📖 User Guide** (default), **🎾 Tournament Players**
 (the results table), and **🧩 Bootstrap Pairs** (auto-selected when the mapping DB has fewer

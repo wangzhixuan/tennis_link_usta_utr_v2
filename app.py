@@ -2,6 +2,7 @@ import os
 import re
 import io
 import json
+import math
 import sqlite3
 import datetime
 import pandas as pd
@@ -11,7 +12,8 @@ from scripts.config import (UTR_USER, UTR_PASS, DB_PATH,
                             BOOTSTRAP_MIN_PLAYERS, BOOTSTRAP_MAX_PLAYERS, BOOTSTRAP_MAX_DEPTH)
 from scripts.usta_scraper import USTAScraper
 from scripts.utr_scraper import UTRScraper
-from scripts.matcher import PlayerMatcher
+from scripts.matcher import (PlayerMatcher, WTN_UTR_INTERCEPT, WTN_UTR_SLOPE,
+                             WTN_UTR_RESID_SD, RATING_MIN_COMPATIBILITY)
 from scripts.db import (get_connection, save_mapping, save_usta_player_history,
                         save_utr_player_history, count_mappings)
 
@@ -314,6 +316,79 @@ TennisLink pulls a **USTA tournament draw** and enriches each player with their
 """
     )
 
+    st.divider()
+    render_rating_band_chart()
+
+
+def render_rating_band_chart():
+    """Plot the plausible WTN <-> UTR band used to reject implausible matches."""
+    st.subheader("WTN ↔ UTR match band")
+    st.caption(
+        f"Empirical mapping: UTR ≈ {WTN_UTR_INTERCEPT:.2f} "
+        f"{WTN_UTR_SLOPE:+.4f} × WTN (residual sd ≈ {WTN_UTR_RESID_SD:.2f}). "
+        f"Shaded = plausible band; candidate UTRs outside it are rejected "
+        f"(compatibility < {RATING_MIN_COMPATIBILITY:.2f})."
+    )
+
+    wtn_vals = list(range(1, 41))
+    expected = [max(1.0, min(16.5, WTN_UTR_INTERCEPT + WTN_UTR_SLOPE * w)) for w in wtn_vals]
+    z_limit = math.sqrt(-2.0 * math.log(RATING_MIN_COMPATIBILITY))
+    half = z_limit * WTN_UTR_RESID_SD
+    band = pd.DataFrame({
+        "WTN": wtn_vals,
+        "expected": expected,
+        "lower": [max(1.0, e - half) for e in expected],
+        "upper": [min(16.5, e + half) for e in expected],
+    })
+
+    sample = None
+    try:
+        conn = get_connection()
+        rows = conn.execute(
+            """
+            SELECT u.wtn_singles AS wtn, r.utr_singles AS utr
+            FROM player_mappings m
+            JOIN usta_player_profiles u ON u.usta_id = m.usta_id
+            JOIN utr_player_profiles r ON r.utr_id = m.utr_id
+            WHERE u.wtn_singles IS NOT NULL AND r.utr_singles IS NOT NULL AND r.utr_singles > 0
+            """
+        ).fetchall()
+        conn.close()
+        if rows:
+            sample = pd.DataFrame([dict(r) for r in rows])
+    except Exception:
+        sample = None
+
+    try:
+        import altair as alt
+        x_scale = alt.Scale(domain=[1, 40])
+        y_scale = alt.Scale(domain=[0, 17])
+        x_enc = alt.X("WTN:Q", title="WTN (lower is better)", scale=x_scale)
+        area = alt.Chart(band).mark_area(opacity=0.15, color="#4C78A8").encode(
+            x=x_enc,
+            y=alt.Y("lower:Q", title="UTR (higher is better)", scale=y_scale),
+            y2="upper:Q",
+        )
+        line = alt.Chart(band).mark_line(color="#4C78A8", strokeWidth=2).encode(
+            x=x_enc, y=alt.Y("expected:Q", scale=y_scale),
+        )
+        layers = [area, line]
+        if sample is not None and not sample.empty:
+            layers.append(
+                alt.Chart(sample).mark_circle(size=18, opacity=0.3, color="#F58518").encode(
+                    x=alt.X("wtn:Q", scale=x_scale),
+                    y=alt.Y("utr:Q", scale=y_scale),
+                    tooltip=[alt.Tooltip("wtn:Q", title="WTN"), alt.Tooltip("utr:Q", title="UTR")],
+                )
+            )
+        st.altair_chart(alt.layer(*layers).properties(height=360), use_container_width=True)
+        if sample is not None and not sample.empty:
+            st.caption(f"Orange dots: {len(sample)} local mapped pairs (WTN vs UTR).")
+    except Exception:
+        st.line_chart(band.set_index("WTN")[["lower", "expected", "upper"]])
+        if sample is not None and not sample.empty:
+            st.scatter_chart(sample, x="wtn", y="utr")
+
 
 
 # ── Session state ──────────────────────────────────────────────────
@@ -512,29 +587,14 @@ if _trigger:
             usta_id = up["usta_id"]
             force = usta_id in st.session_state.force_refresh
 
-            # ── USTA profile: check DB cache first ──
-            usta_cached = None
-            if run_profiles:
-                row = conn.execute(
-                    "SELECT * FROM usta_player_profiles WHERE usta_id = ?", (usta_id,)
-                ).fetchone()
-                if row:
-                    usta_cached = dict(row)
-                    # Re-fetch if cached wtn_singles is None but API metadata exists
-                    # (indicates stale cache from a prior scrape that missed the value)
-                    if usta_cached.get("wtn_singles") is None and usta_cached.get("wtn_singles_confidence") is not None:
-                        usta_cached = None
-                    # On force refresh, only keep cache if profiled today
-                    elif force and not _updated_today(usta_cached.get("last_updated")):
-                        usta_cached = None
-
-            if usta_cached:
-                up["wtn_singles"] = usta_cached.get("wtn_singles")
-                up["wtn_doubles"] = usta_cached.get("wtn_doubles")
-                up["section"] = usta_cached.get("section")
-                up["district"] = usta_cached.get("district")
-                up["gender"] = usta_cached.get("gender")
-                ranking_json = usta_cached.get("ranking_json")
+            # ── USTA profile: refresh event players unless already pulled today ──
+            def _apply_cached_usta(cached):
+                up["wtn_singles"] = cached.get("wtn_singles")
+                up["wtn_doubles"] = cached.get("wtn_doubles")
+                up["section"] = cached.get("section")
+                up["district"] = cached.get("district")
+                up["gender"] = cached.get("gender")
+                ranking_json = cached.get("ranking_json")
                 if ranking_json:
                     up["rankings"] = json.loads(ranking_json)
                 else:
@@ -542,13 +602,25 @@ if _trigger:
                         "SELECT * FROM usta_player_rankings WHERE usta_id = ?", (usta_id,)
                     ).fetchall()
                     up["rankings"] = [dict(r) for r in ranking_rows]
-                usta_ts = usta_cached.get("last_updated", "")
-            elif run_profiles:
+
+            row = conn.execute(
+                "SELECT * FROM usta_player_profiles WHERE usta_id = ?", (usta_id,)
+            ).fetchone()
+            cached = dict(row) if row else None
+            # Treat an "empty WTN but metadata present" cache as stale (prior failed scrape)
+            if cached and cached.get("wtn_singles") is None and cached.get("wtn_singles_confidence") is not None:
+                cached = None
+
+            if run_profiles and not (cached and _updated_today(cached.get("last_updated"))):
+                # Fetch fresh (not pulled today)
                 profile = usta.fetch_player_profile(usta_id, headless=headless)
                 if profile:
                     up.update(profile)
                     save_usta_player_history(usta_id, profile)
                 usta_ts = datetime.datetime.now().isoformat()
+            elif cached:
+                _apply_cached_usta(cached)
+                usta_ts = cached.get("last_updated", "")
             else:
                 usta_ts = ""
 
@@ -616,6 +688,7 @@ if _trigger:
                 "Player Name": up["name"],
                 "Hometown": f"{up.get('city') or ''}, {up.get('state') or ''}".strip(", "),
                 "USTA ID": up["usta_id"],
+                "Status": _val(up.get("status")),
                 "Gender": gender_display,
                 "WTN": _val(up.get("wtn_singles")),
                 ranking_list_label: _val(points),
@@ -661,7 +734,7 @@ if _trigger:
 
         st.session_state.force_refresh = set()
         df = pd.DataFrame(resolved)
-        col_order = ["Player Name", "Hometown", "USTA ID"]
+        col_order = ["Player Name", "Hometown", "USTA ID", "Status"]
         if is_mixed:
             col_order.append("Gender")
         col_order += ["WTN", ranking_list_label, "Profile Updated",
@@ -773,12 +846,6 @@ elif st.session_state.last_run is not None:
     display_df["Profile Updated"] = df["Profile Updated"].apply(_fmt_ts)
     display_df["UTR Updated"] = df["UTR Updated"].apply(_fmt_ts)
 
-    # Sort by ranking points descending by default (N/A at bottom)
-    if rl in display_df.columns:
-        display_df["_rank_sort"] = pd.to_numeric(display_df[rl].replace("N/A", None), errors="coerce")
-        display_df = display_df.sort_values("_rank_sort", ascending=False, na_position="last")
-        display_df = display_df.drop(columns=["_rank_sort"])
-
     # Gender filter (only shown when Gender column present)
     if "Gender" in display_df.columns:
         gender_vals = sorted([g for g in display_df["Gender"].dropna().unique() if g])
@@ -788,14 +855,43 @@ elif st.session_state.last_run is not None:
         if gender_filter != "All":
             display_df = display_df[display_df["Gender"] == gender_filter]
 
+    # Sort control — "#" is the rank under the currently selected sort
+    numeric_cols = [c for c in ["WTN", rl, "UTR"] if c in display_df.columns]
+    sort_options = []
+    for c in [rl, "WTN", "UTR", "Status", "Player Name", "Hometown"]:
+        if c in display_df.columns and c not in sort_options:
+            sort_options.append(c)
+    if not sort_options:
+        sort_options = ["Player Name"]
+
+    s_col, o_col = st.columns([1, 1])
+    sort_choice = s_col.selectbox("Sort by", sort_options, index=0, key="sort_by")
+    order = o_col.radio("Order", ["Descending", "Ascending"], horizontal=True, key="sort_order")
+    ascending = order == "Ascending"
+    st.caption("The **#** column renumbers to match **Sort by**. "
+               "(Clicking column headers re-sorts the view only.)")
+
+    if sort_choice in numeric_cols:
+        display_df["_sort_key"] = pd.to_numeric(display_df[sort_choice], errors="coerce")
+        display_df = display_df.sort_values("_sort_key", ascending=ascending, na_position="last")
+        display_df = display_df.drop(columns=["_sort_key"])
+    else:
+        display_df = display_df.sort_values(
+            sort_choice, ascending=ascending, na_position="last",
+            key=lambda s: s.astype(str).str.lower(),
+        )
+
     display_df = display_df.reset_index(drop=True)
     display_df.insert(0, "#", display_df.index + 1)
 
     col_config = {
-        "#": st.column_config.TextColumn("#", width="small"),
+        "#": st.column_config.TextColumn("#", width="small",
+            help="Rank under the currently selected 'Sort by' column"),
         "Player Name": st.column_config.TextColumn("Player Name", width="medium"),
         "Hometown": st.column_config.TextColumn("Hometown", width="medium"),
         "USTA ID": st.column_config.TextColumn("USTA ID", width="small"),
+        "Status": st.column_config.TextColumn("Status", width="small",
+            help="Tournament entry status: Accepted / Alternate / Withdrawn"),
         "Gender": st.column_config.TextColumn("Gender", width="small"),
         "USTA Profile": st.column_config.LinkColumn("USTA", width="small",
             display_text=r"uaid=(\d+)$"),
@@ -810,7 +906,7 @@ elif st.session_state.last_run is not None:
         col_config[rl] = st.column_config.NumberColumn(rl, width="small", format="%d",
             help="Points in the selected ranking list")
 
-    base_order = ["#", "Player Name"]
+    base_order = ["#", "Player Name", "Status"]
     if "Gender" in display_df.columns:
         base_order.append("Gender")
     base_order += ["WTN"]

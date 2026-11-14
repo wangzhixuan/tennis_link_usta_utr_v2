@@ -151,6 +151,7 @@ def main():
             "Player Name": up["name"],
             "Hometown": f"{up.get('city') or ''}, {up.get('state') or ''}".strip(", "),
             "USTA ID": up["usta_id"],
+            "Status": _val(up.get("status")),
             "WTN Singles": _val(up.get("wtn_singles")),
             "WTN Doubles": _val(up.get("wtn_doubles")),
             "Ranking Points": _val(points),
@@ -198,7 +199,7 @@ def main():
 
     df = pd.DataFrame(resolved_records)
     col_order = [
-        "Player Name", "Hometown", "USTA ID",
+        "Player Name", "Hometown", "USTA ID", "Status",
         "WTN Singles", "WTN Doubles",
         "Ranking Points", "Ranking List",
         "UTR ID", "Match Confidence", "UTR Singles", "UTR Doubles", "Match Method",
