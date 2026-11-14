@@ -8,6 +8,8 @@ import datetime
 import pandas as pd
 import streamlit as st
 
+from scripts.render import build_results_html, short_ranking_label
+
 from scripts.config import (UTR_USER, UTR_PASS, DB_PATH,
                             BOOTSTRAP_MIN_PLAYERS, BOOTSTRAP_MAX_PLAYERS, BOOTSTRAP_MAX_DEPTH)
 from scripts.usta_scraper import USTAScraper
@@ -243,6 +245,13 @@ def render_bootstrap_tab():
             usta = USTAScraper()
             utr = UTRScraper()
             status = st.status("Bootstrapping mapping DB...", expanded=True)
+            if UTRScraper.is_rate_limited():
+                status.update(label="UTR rate-limited", state="error")
+                st.error(
+                    f"UTR is rate-limiting. Please wait ~{UTRScraper.rate_limit_remaining()}s "
+                    f"before bootstrapping."
+                )
+                return
             if not usta.check_usta_token():
                 status.update(label="USTA token unavailable", state="error")
                 st.error("Could not find a valid USTA match-API token. Please (re)login to USTA.")
@@ -389,6 +398,9 @@ def render_rating_band_chart():
         if sample is not None and not sample.empty:
             st.scatter_chart(sample, x="wtn", y="utr")
 
+
+def render_results_table(display_df, col_order, ranking_label):
+    st.html(build_results_html(display_df, col_order, ranking_label))
 
 
 # ── Session state ──────────────────────────────────────────────────
@@ -569,10 +581,18 @@ if _trigger:
         if not no_login:
             utr.login_if_needed()
 
+        utr_rate_limited = False
+        if UTRScraper.is_rate_limited():
+            utr_rate_limited = True
+            st.warning(
+                f"⏸️ UTR is rate-limiting. Pausing UTR lookups for ~"
+                f"{UTRScraper.rate_limit_remaining()}s — UTR ratings will be N/A until then."
+            )
+
         matcher = PlayerMatcher(utr)
         is_mixed = is_mixed_team_division(division)
         ranking_list_name = build_ranking_list_name(division)
-        ranking_list_label = ranking_list_name or "Ranking Pts"
+        ranking_list_label = short_ranking_label(division) or "Rank Pts"
 
         resolved = []
         player_pb = st.progress(0.0)
@@ -631,7 +651,16 @@ if _trigger:
             points = get_points_for_list(up.get("rankings", []), points_list)
 
             # ── UTR profile ──
-            match_res = matcher.find_utr_profile(up, usta_players, no_cross_ref=no_cross_ref)
+            if utr_rate_limited or UTRScraper.is_rate_limited():
+                if not utr_rate_limited:
+                    utr_rate_limited = True
+                    status.write(
+                        f"⏸️ UTR rate limit hit — pausing UTR lookups for ~"
+                        f"{UTRScraper.rate_limit_remaining()}s. Remaining players will show N/A."
+                    )
+                match_res = None
+            else:
+                match_res = matcher.find_utr_profile(up, usta_players, no_cross_ref=no_cross_ref)
 
             utr_ts = ""
             utr_id = None
@@ -702,9 +731,12 @@ if _trigger:
         conn.close()
 
         # If any players still have 0.0 (obfuscated) UTR, try fresh API call with JWT
-        if utr_login_status:
+        if utr_login_status and not UTRScraper.is_rate_limited():
             usta_lookup = {p["usta_id"]: p for p in usta_players}
             for rec in resolved:
+                if UTRScraper.is_rate_limited():
+                    status.write("⏸️ UTR rate limit hit — stopping further UTR lookups for this run.")
+                    break
                 uid = rec["UTR ID"]
                 if uid in ("N/A", None, ""):
                     continue
@@ -830,7 +862,7 @@ elif st.session_state.last_run is not None:
     display_df["UTR Profile"] = display_df["UTR ID"].apply(
         lambda x: f"https://app.utrsports.net/profiles/{x}" if x != "N/A" else ""
     )
-    rl = st.session_state.last_run.get("ranking_label", "Ranking Pts")
+    rl = st.session_state.last_run.get("ranking_label", "Rank Pts")
     for col in ["WTN", rl, "UTR"]:
         if col in display_df.columns:
             display_df[col] = display_df[col].replace("N/A", None)
@@ -868,8 +900,7 @@ elif st.session_state.last_run is not None:
     sort_choice = s_col.selectbox("Sort by", sort_options, index=0, key="sort_by")
     order = o_col.radio("Order", ["Descending", "Ascending"], horizontal=True, key="sort_order")
     ascending = order == "Ascending"
-    st.caption("The **#** column renumbers to match **Sort by**. "
-               "(Clicking column headers re-sorts the view only.)")
+    st.caption("The **#** column is pinned left and numbered 1..N for the current **Sort by** order.")
 
     if sort_choice in numeric_cols:
         display_df["_sort_key"] = pd.to_numeric(display_df[sort_choice], errors="coerce")
@@ -884,28 +915,6 @@ elif st.session_state.last_run is not None:
     display_df = display_df.reset_index(drop=True)
     display_df.insert(0, "#", display_df.index + 1)
 
-    col_config = {
-        "#": st.column_config.TextColumn("#", width="small",
-            help="Rank under the currently selected 'Sort by' column"),
-        "Player Name": st.column_config.TextColumn("Player Name", width="medium"),
-        "Hometown": st.column_config.TextColumn("Hometown", width="medium"),
-        "USTA ID": st.column_config.TextColumn("USTA ID", width="small"),
-        "Status": st.column_config.TextColumn("Status", width="small",
-            help="Tournament entry status: Accepted / Alternate / Withdrawn"),
-        "Gender": st.column_config.TextColumn("Gender", width="small"),
-        "USTA Profile": st.column_config.LinkColumn("USTA", width="small",
-            display_text=r"uaid=(\d+)$"),
-        "WTN": st.column_config.NumberColumn("WTN", width="small", format="%.1f"),
-        "Profile Updated": st.column_config.TextColumn("Profiled", width="small"),
-        "UTR Profile": st.column_config.LinkColumn("UTR", width="small",
-            display_text=r"profiles/(\d+)$"),
-        "UTR": st.column_config.NumberColumn("UTR Rtng", width="small", format="%.2f"),
-        "UTR Updated": st.column_config.TextColumn("UTR Profiled", width="small"),
-    }
-    if rl in display_df.columns:
-        col_config[rl] = st.column_config.NumberColumn(rl, width="small", format="%d",
-            help="Points in the selected ranking list")
-
     base_order = ["#", "Player Name", "Status"]
     if "Gender" in display_df.columns:
         base_order.append("Gender")
@@ -915,13 +924,7 @@ elif st.session_state.last_run is not None:
     base_order += ["Profile Updated", "UTR", "UTR Updated",
                    "Hometown", "USTA Profile", "UTR Profile"]
 
-    st.dataframe(
-        display_df,
-        column_config=col_config,
-        column_order=base_order,
-        hide_index=True,
-        width="stretch",
-    )
+    render_results_table(display_df, base_order, rl)
 
     # ── Report wrong mapping & correct manually ──
     st.divider()

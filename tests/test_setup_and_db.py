@@ -31,6 +31,7 @@ db.DB_PATH = os.path.join(tempfile.gettempdir(), "tennislink_test.db")
 
 # Re-init with test DB
 db.init_db()
+db.reset_all()
 
 with db.get_connection() as conn:
     tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()

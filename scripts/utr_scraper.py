@@ -1,5 +1,7 @@
 import re
+import os
 import json
+import time
 import logging
 import requests
 from typing import Optional
@@ -13,6 +15,9 @@ SEARCH_URL = "https://api.utrsports.net/v2/search/players"
 PROFILE_URL = "https://api.utrsports.net/v1/player/{utr_id}/profile"
 SESSION_URL = "https://app.utrsports.net"
 
+# When UTR returns 429 we stop calling it for this long (shared across the process).
+RATE_LIMIT_COOLDOWN_SECONDS = int(os.getenv("UTR_RATE_LIMIT_COOLDOWN", "300"))
+
 
 class UTRProfileNotFoundError(Exception):
     """Raised or used when a UTR profile ID does not exist on UTR Sports (e.g. HTTP 404)."""
@@ -20,6 +25,29 @@ class UTRProfileNotFoundError(Exception):
 
 
 class UTRScraper:
+    # Process-wide cooldown: once UTR returns 429, stop calling it for a while.
+    _rate_limited_until = 0.0
+
+    @classmethod
+    def reset_rate_limit(cls):
+        cls._rate_limited_until = 0.0
+
+    @classmethod
+    def is_rate_limited(cls) -> bool:
+        return time.time() < cls._rate_limited_until
+
+    @classmethod
+    def rate_limit_remaining(cls) -> int:
+        return max(0, int(round(cls._rate_limited_until - time.time())))
+
+    @classmethod
+    def _mark_rate_limited(cls):
+        cls._rate_limited_until = time.time() + RATE_LIMIT_COOLDOWN_SECONDS
+        mins, secs = divmod(RATE_LIMIT_COOLDOWN_SECONDS, 60)
+        logger.warning(
+            f"UTR rate limit hit (429). Pausing all UTR requests for {mins} min {secs}s."
+        )
+
     def __init__(self, email=UTR_USER, password=UTR_PASS, jwt=None):
         self.email = email
         self.password = password
@@ -99,17 +127,28 @@ class UTRScraper:
         """Check whether a UTR profile ID exists on UTR Sports (returns False if 404)."""
         if not utr_id or utr_id in ("N/A", "None", ""):
             return False
+        if self.is_rate_limited():
+            return True  # don't invalidate mappings while rate-limited
         try:
             resp = self.session.get(PROFILE_URL.format(utr_id=utr_id), timeout=8)
+            if resp.status_code == 429:
+                self._mark_rate_limited()
+                return True
             return resp.status_code != 404
         except Exception:
             return True  # Network errors shouldn't be confused with 404
 
     def get_player_profile(self, utr_id: str, fallback_no_jwt=True) -> Optional[dict]:
-        import time
-        jwt = self._ensure_jwt()
         self.last_status_code = None
         self.last_profile_not_found = False
+        if self.is_rate_limited():
+            logger.warning(
+                f"UTR is rate-limited; skipping profile {utr_id} "
+                f"(retry in {self.rate_limit_remaining()}s)"
+            )
+            self.last_status_code = 429
+            return None
+        jwt = self._ensure_jwt()
 
         if not utr_id or utr_id in ("N/A", "None", ""):
             self.last_profile_not_found = True
@@ -121,19 +160,18 @@ class UTRScraper:
                 headers["Cookie"] = f"jwt={jwt}"
             return self.session.get(PROFILE_URL.format(utr_id=utr_id), headers=headers, timeout=10)
 
-        # Try with JWT first (precise ratings), fall back to no-JWT (integer-rounded)
+        # Try with JWT first (precise ratings). On 429, enter cooldown and stop.
         try:
             resp = _fetch(use_jwt=True)
             using_fallback = False
-            if resp.status_code == 429 and fallback_no_jwt:
-                logger.warning(f"Rate limited (429) on {utr_id}, falling back to no-JWT (approximate rating)")
-                resp = _fetch(use_jwt=False)
-                using_fallback = True
         except Exception as e:
             logger.warning(f"UTR profile request failed for {utr_id}: {e}")
             return None
 
         self.last_status_code = resp.status_code
+        if resp.status_code == 429:
+            self._mark_rate_limited()
+            return None
         if resp.status_code == 404:
             self.last_profile_not_found = True
             logger.warning(
@@ -222,9 +260,18 @@ class UTRScraper:
         return None
 
     def _api_search(self, name: str, city: str = None, state: str = None) -> list:
+        if self.is_rate_limited():
+            logger.warning(
+                f"UTR is rate-limited; skipping search for '{name}' "
+                f"(retry in {self.rate_limit_remaining()}s)"
+            )
+            return []
         params = {"query": name, "top": 10}
         try:
             resp = self.session.get(SEARCH_URL, params=params, timeout=10)
+            if resp.status_code == 429:
+                self._mark_rate_limited()
+                return []
             if resp.status_code != 200:
                 return []
 
@@ -303,6 +350,12 @@ class UTRScraper:
         Return every singles match in a player's UTR history (one entry per match/opponent),
         including date, score and outcome for cross-source match correlation.
         """
+        if self.is_rate_limited():
+            logger.warning(
+                f"UTR is rate-limited; skipping match history for {utr_id} "
+                f"(retry in {self.rate_limit_remaining()}s)"
+            )
+            return []
         jwt = self._ensure_jwt()
         if not jwt:
             logger.warning("No JWT available for UTR match history API.")
@@ -318,6 +371,9 @@ class UTRScraper:
                 f"https://api.utrsports.net/v4/player/{utr_id}/results?type=s",
                 headers=headers, timeout=15
             )
+            if resp.status_code == 429:
+                self._mark_rate_limited()
+                return []
             if resp.status_code != 200:
                 logger.debug(f"UTR v4 results returned {resp.status_code}")
                 return []

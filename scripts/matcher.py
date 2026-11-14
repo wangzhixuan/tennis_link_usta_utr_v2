@@ -7,7 +7,8 @@ import difflib
 import logging
 from typing import Optional
 from scripts.config import GOLDEN_MAPPING_PATH
-from scripts.db import get_mapping, save_mapping, save_utr_cache, get_utr_player_profile
+from scripts.db import (get_mapping, save_mapping, save_utr_cache,
+                        get_utr_player_profile, delete_mapping)
 from scripts.utr_scraper import UTRScraper
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -38,7 +39,9 @@ NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 WTN_UTR_INTERCEPT = 16.845
 WTN_UTR_SLOPE = -0.3956
 WTN_UTR_RESID_SD = 1.1
-RATING_MIN_COMPATIBILITY = 0.05  # below this a WTN/UTR pair is considered implausible
+# Rating compatibility is only a soft tie-breaker when ranking candidates. This
+# threshold is used by the UI to draw the "plausible band" in the WTN<->UTR chart.
+RATING_MIN_COMPATIBILITY = 0.05
 
 
 class PlayerMatcher:
@@ -171,21 +174,50 @@ class PlayerMatcher:
         
         excluded = {str(x) for x in exclude_utr_ids} if exclude_utr_ids else set()
 
-        # Level 1: Check Local Cache Map
+        # Level 1: Check local cache, but validate it before trusting it.
+        # A cached mapping is ignored if its UTR rating is missing/0 or if the
+        # WTN/UTR pair is implausible. Manual corrections stay authoritative.
         if not ignore_cache:
             cached_mapping = get_mapping(usta_id)
             if cached_mapping and str(cached_mapping.get("utr_id")) not in excluded:
                 utr_id = str(cached_mapping["utr_id"])
-                # If validation requested, verify that the cached profile still exists
+                method = str(cached_mapping.get("match_method") or "").lower()
+                cached_profile = get_utr_player_profile(utr_id)
+
+                invalid_reason = None
+                if method != "manual_correct" and cached_profile:
+                    # Validity is based on identity (name), not on rating compatibility.
+                    cached_name = cached_profile.get("name") or ""
+                    name_sim = self.name_similarity(usta_name, cached_name)
+                    cached_utr = cached_profile.get("utr_singles")
+                    try:
+                        cached_utr_f = float(cached_utr) if cached_utr is not None else None
+                    except (TypeError, ValueError):
+                        cached_utr_f = None
+
+                    if name_sim < 0.75:
+                        invalid_reason = (
+                            f"cached profile name '{cached_name}' doesn't match "
+                            f"(similarity {name_sim:.2f})"
+                        )
+                    elif (cached_utr_f is None or cached_utr_f <= 0) and name_sim < 0.9:
+                        invalid_reason = f"cached UTR rating is missing/0 ({cached_utr})"
+
                 if validate_cached and not self.utr_scraper.check_profile_exists(utr_id):
+                    invalid_reason = "profile no longer exists (404)"
+
+                if invalid_reason and method != "manual_correct":
                     logger.warning(
-                        f"Cached UTR ID {utr_id} for USTA ID {usta_id} no longer exists on UTR Sports (404)! "
-                        f"Bypassing stale mapping to search for new profile..."
+                        f"Ignoring cached mapping USTA {usta_id} -> UTR {utr_id}: "
+                        f"{invalid_reason}. Re-matching..."
                     )
                     excluded.add(utr_id)
+                    try:
+                        delete_mapping(usta_id)
+                    except Exception:
+                        pass
                 else:
                     logger.info(f"Cache HIT for USTA ID {usta_id} -> UTR ID {utr_id}")
-                    cached_profile = get_utr_player_profile(utr_id)
                     return {
                         "utr_id": utr_id,
                         "confidence": cached_mapping["confidence"],
@@ -226,29 +258,51 @@ class PlayerMatcher:
                 # Name is too different, skip this candidate
                 continue
 
-            # 2. Rating plausibility: does this UTR make sense for the player's WTN?
-            rating_score = self.rating_compatibility(
-                usta_player.get("wtn_singles"), cand.get("utr_singles")
-            )
-            if rating_score is not None and rating_score < RATING_MIN_COMPATIBILITY:
+            # 2. Resolve a usable UTR rating. Search results often report 0.0 for
+            # unrated players; try the profile once, otherwise skip the candidate
+            # (we don't want to link players to a 0-rating profile).
+            try:
+                cand_utr_f = float(cand.get("utr_singles")) if cand.get("utr_singles") is not None else None
+            except (TypeError, ValueError):
+                cand_utr_f = None
+            if cand_utr_f is None or cand_utr_f <= 0:
+                try:
+                    prof = self.utr_scraper.get_player_profile(cand["utr_id"])
+                except Exception:
+                    prof = None
+                if prof:
+                    cand["utr_singles"] = prof.get("utr_singles")
+                    cand["utr_doubles"] = prof.get("utr_doubles")
+                    cand["name"] = prof.get("name") or cand["name"]
+                    cand["city"] = prof.get("city") or cand.get("city")
+                    cand["state"] = prof.get("state") or cand.get("state")
+                    try:
+                        cand_utr_f = float(cand["utr_singles"]) if cand["utr_singles"] is not None else None
+                    except (TypeError, ValueError):
+                        cand_utr_f = None
+            if cand_utr_f is None or cand_utr_f <= 0:
                 logger.info(
-                    f"Skipping {cand.get('name')} for {usta_name}: UTR {cand.get('utr_singles')} "
-                    f"implausible for WTN {usta_player.get('wtn_singles')} "
-                    f"(compatibility={rating_score:.3f})"
+                    f"Skipping {cand.get('name')} for {usta_name}: no usable UTR rating "
+                    f"(got {cand.get('utr_singles')})"
                 )
                 continue
 
-            # 3. Location match score
+            # 3. Rating compatibility — used only as a soft tie-breaker (never a hard reject)
+            rating_score = self.rating_compatibility(
+                usta_player.get("wtn_singles"), cand_utr_f
+            )
+
+            # 4. Location match score
             loc_score = self.location_score(
                 hometown_city, hometown_state,
                 cand.get("city"), cand.get("state")
             )
-            
-            # Base confidence combines name similarity and location score, damped
-            # when the WTN/UTR ratings disagree.
+
+            # Base confidence from name + location; ratings nudge it slightly so
+            # that, between similar candidates, the more plausible WTN/UTR wins.
             confidence = (name_sim * 0.6) + (loc_score * 0.4)
             if rating_score is not None:
-                confidence *= (0.7 + 0.3 * rating_score)
+                confidence *= (0.9 + 0.1 * rating_score)
 
             scored_candidates.append({
                 "candidate": cand,
@@ -476,20 +530,18 @@ class PlayerMatcher:
                 rating_score = self.rating_compatibility(
                     uc.get("wtn_singles"), tc.get("utr_singles")
                 )
-                if rating_score is not None and rating_score < RATING_MIN_COMPATIBILITY:
-                    continue
 
                 if require_name_match and name_sim < name_threshold and (loc is None or loc < 0.75):
                     continue
 
                 # Date+score already prove the same physical match; name/residence
-                # refine confidence in the opponent's *identity*.
+                # refine confidence, and ratings are a mild tie-breaker.
                 if loc is not None:
                     confidence = 0.7 + 0.15 * min(name_sim, 1.0) + 0.15 * loc
                 else:
                     confidence = 0.7 + 0.3 * min(name_sim, 1.0)
                 if rating_score is not None:
-                    confidence *= (0.7 + 0.3 * rating_score)
+                    confidence *= (0.9 + 0.1 * rating_score)
 
                 if confidence < min_confidence:
                     continue

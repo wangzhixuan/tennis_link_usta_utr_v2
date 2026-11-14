@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from scripts import db
 db.DB_PATH = os.path.join(tempfile.gettempdir(), "tennislink_test_profiles.db")
 db.init_db()
+db.reset_all()
 
 print("=" * 60)
 print("Testing USTA Profile & Ranking Fetching")

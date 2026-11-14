@@ -106,6 +106,11 @@ def main():
     utr_scraper = UTRScraper()
     if not args.no_login:
         utr_scraper.login_if_needed()
+    if UTRScraper.is_rate_limited():
+        logger.warning(
+            f"UTR is rate-limiting. Pausing UTR lookups for "
+            f"{UTRScraper.rate_limit_remaining()}s; UTR ratings will be N/A this run."
+        )
 
     matcher = PlayerMatcher(utr_scraper)
 

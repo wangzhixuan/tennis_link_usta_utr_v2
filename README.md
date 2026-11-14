@@ -201,10 +201,10 @@ setup, or back up `tennislink.db` first.
 
 ## Notes & troubleshooting
 
-- **UTR rate limits**: UTR's JWT-authenticated API can return HTTP 429 for extended
-  periods. `utr_scraper.py` automatically falls back to the no-JWT endpoint (integer
-  ratings only). Precise decimal ratings are restored once the limit clears and
-  `batch_fetch.py` re-fetches.
+- **UTR rate limits**: UTR's JWT-authenticated API can return HTTP 429. When that happens the
+  app enters a process-wide cooldown and stops all UTR requests for
+  `UTR_RATE_LIMIT_COOLDOWN` seconds (default 300), showing a notice instead of hammering the
+  API. Affected players show `N/A` for UTR until the cooldown clears.
 - **Golden mapping is personal data**: mapping CSVs and everything under `data/`
   (tournament reports + SQLite DBs) are git-ignored on purpose. Share source code, not
   those files.

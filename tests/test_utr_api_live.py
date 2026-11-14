@@ -217,6 +217,10 @@ for label, data, expect_empty, *extra in cases:
             assert len(candidates) == 0, f"{label}: expected empty list"
     print(f"  {label}: PASSED")
 
+# The simulated 429 above triggers the process-wide cooldown; clear it for the
+# remaining mocked checks in this section.
+UTRScraper.reset_rate_limit()
+
 # Location display parsing
 mock_hit = {
     "hits": [{
@@ -265,6 +269,9 @@ with patch.object(scraper.session, 'get') as mock_get:
 
 print("  PASSED")
 
+
+# Reset the cooldown triggered by the simulated 429 above so later live checks still run
+UTRScraper.reset_rate_limit()
 
 # ── 6. Match history variance ──────────────────────────────────────────
 print("\n[6/8] Match history: multiple response formats...")

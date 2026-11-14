@@ -153,7 +153,25 @@ with patch.object(scraper.session, 'get') as mock_get:
     candidates = scraper.search_players("Nobody Here")
     assert candidates == [], f"Expected empty list, got {len(candidates)}"
     print("  Empty hits returns empty list: PASSED")
-    print("  PASSED")
+
+# 429 triggers a process-wide cooldown; subsequent calls are skipped without network
+UTRScraper.reset_rate_limit()
+rl = UTRScraper()
+rl._jwt_cache = "test"
+with patch.object(rl.session, 'get') as mock_get:
+    resp = MagicMock()
+    resp.status_code = 429
+    mock_get.return_value = resp
+    assert rl.get_player_profile("12345") is None
+assert UTRScraper.is_rate_limited()
+assert UTRScraper.rate_limit_remaining() > 0
+with patch.object(rl.session, 'get') as mock_get2:
+    assert rl._api_search("Nobody") == []
+    assert rl.get_player_profile("12345") is None
+    mock_get2.assert_not_called()
+UTRScraper.reset_rate_limit()
+print("  429 cooldown (pause + skip): PASSED")
+print("  PASSED")
 
 # 5. Test login guard behavior
 print("\n[5/5] Testing login guard behavior...")

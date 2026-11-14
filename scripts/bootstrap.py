@@ -134,6 +134,12 @@ def bootstrap_from_seed(
             remaining = max_players - len(known_usta)
             if remaining <= 0:
                 break
+            if getattr(utr, "is_rate_limited", lambda: False)():
+                log(
+                    f"  ! UTR rate limit active — pausing for "
+                    f"{utr.rate_limit_remaining()}s. Stopping expansion."
+                )
+                break
             log(f"  Fetching match history: USTA {uid} <-> UTR {tid} ...")
             try:
                 usta_matches = usta.get_player_matches(uid)

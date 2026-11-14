@@ -82,6 +82,12 @@ def fetch_pairs(pairs, do_usta, do_utr, headless=True):
 
     try:
         for idx, (usta_id, utr_id) in enumerate(pairs):
+            if do_utr and getattr(utr_scraper, "is_rate_limited", lambda: False)():
+                logger.warning(
+                    f"UTR rate limit hit — pausing UTR requests for "
+                    f"{utr_scraper.rate_limit_remaining()}s. Stopping UTR fetch."
+                )
+                do_utr = False
             did_fetch = False
             if do_usta:
                 if needs_usta_fetch(usta_id):

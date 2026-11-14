@@ -9,13 +9,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from scripts import db
 db.DB_PATH = os.path.join(tempfile.gettempdir(), "tennislink_test_p4.db")
 db.init_db()
+db.reset_all()  # start clean even if a previous run left data behind
 
 print("=" * 60)
 print("Player Matcher: name/location + match-history")
 print("=" * 60)
 
 # 1. Name normalization
-print("\n[1/6] Testing name normalization...")
+print("\n[1/7] Testing name normalization...")
 from scripts.matcher import PlayerMatcher
 from scripts.utr_scraper import UTRScraper
 
@@ -30,7 +31,7 @@ assert matcher.normalize_name("") == ""
 print("  normalize_name: all cases passed")
 
 # 2. Name similarity
-print("\n[2/6] Testing name similarity scoring...")
+print("\n[2/7] Testing name similarity scoring...")
 assert matcher.name_similarity("John Doe", "John Doe") == 1.0
 
 sim = matcher.name_similarity("John M. Doe", "John Doe")
@@ -50,7 +51,7 @@ assert sim > 0.9, f"Expected high sim for Jr suffix removal, got {sim}"
 print("  name_similarity: all cases passed")
 
 # 3. Location scoring (with state abbreviation mapping)
-print("\n[3/6] Testing location scoring...")
+print("\n[3/7] Testing location scoring...")
 assert matcher.location_score("Austin", "TX", "Austin", "TX") == 1.0
 assert matcher.location_score("Austin", "TX", "Austin", "Texas") == 1.0
 assert matcher.location_score("Austin", "Texas", "Austin", "TX") == 1.0
@@ -62,7 +63,7 @@ assert matcher.location_score("Orlando", "FL", "Orlando", "Florida") == 1.0
 print("  location_score: all cases passed")
 
 # 4. Full match flow - cache hit
-print("\n[4/6] Testing full match flow (with mocked UTR scraper)...")
+print("\n[4/7] Testing full match flow (with mocked UTR scraper)...")
 from scripts.db import save_mapping, get_mapping, save_usta_player_profile
 
 save_mapping("CACHE_TEST", "UTR_CACHED", "manual", 1.0)
@@ -131,7 +132,7 @@ with patch.object(matcher.utr_scraper, 'search_players', return_value=[]):
 print("  PASSED")
 
 # 5. Low confidence handling
-print("\n[5/6] Testing low confidence handling...")
+print("\n[5/7] Testing low confidence handling...")
 usta_player5 = {"usta_id": "FRESH_LOWCONF", "name": "Michael Johnson", "city": "Portland", "state": "OR"}
 
 mock_low_conf = [
@@ -155,7 +156,7 @@ with patch.object(matcher.utr_scraper, 'search_players', return_value=mock_low_c
     print("  PASSED")
 
 # 6. WTN <-> UTR rating plausibility
-print("\n[6/6] Testing WTN<->UTR rating compatibility...")
+print("\n[6/7] Testing WTN<->UTR rating compatibility...")
 # WTN 30 -> expected UTR ~4.97
 assert matcher.rating_compatibility(30, 5.0) > 0.9
 # The real-world bad pairings: a low UTR for a weak WTN, or a high UTR for a very weak WTN
@@ -167,20 +168,121 @@ assert matcher.rating_compatibility(30, 0.0) is None
 
 usta_rating = {"usta_id": "RATING_TEST", "name": "Rating Test", "city": "Austin",
                "state": "TX", "wtn_singles": 34.0}
-bad = [{"utr_id": "UTR_BAD", "name": "Rating Test", "city": "Austin", "state": "TX",
-        "utr_singles": 6.5}]
-with patch.object(matcher.utr_scraper, 'search_players', return_value=bad), \
+# Two similar candidates: the plausible WTN/UTR should win the tie-break
+good = {"utr_id": "UTR_GOOD", "name": "Rating Test", "city": "Austin", "state": "TX",
+        "utr_singles": 3.4}
+bad = {"utr_id": "UTR_BAD", "name": "Rating Test", "city": "Dallas", "state": "TX",
+       "utr_singles": 6.5}
+with patch.object(matcher.utr_scraper, 'search_players', return_value=[bad, good]), \
      patch.object(matcher.utr_scraper, 'get_player_matches', return_value=[]):
-    assert matcher.find_utr_profile(usta_rating) is None, "Implausible UTR should be rejected"
-print("  Implausible WTN/UTR pair rejected: PASSED")
+    res = matcher.find_utr_profile(usta_rating)
+assert res is not None and res["utr_id"] == "UTR_GOOD", "Plausible pair should win the tie-break"
+print("  Rating compatibility breaks the tie: PASSED")
 
+# Compatibility must NOT hard-reject: the only (implausible) candidate is still returned
+with patch.object(matcher.utr_scraper, 'search_players', return_value=[bad]), \
+     patch.object(matcher.utr_scraper, 'get_player_matches', return_value=[]):
+    res = matcher.find_utr_profile(usta_rating, ignore_cache=True)
+assert res is not None and res["utr_id"] == "UTR_BAD", "Implausible-only must not be hard-rejected"
+print("  Implausible-only candidate not hard-rejected: PASSED")
+
+# Real case: exact name+city (WTN 26.8 / UTR 3.51) is accepted
+annabelle = {"usta_id": "ANNABELLE", "name": "Annabelle Gramm", "city": "San Diego",
+             "state": "CA", "wtn_singles": 26.8}
+annabelle_cand = [{"utr_id": "4925193", "name": "Annabelle Gramm", "city": "San Diego",
+                   "state": "CA", "utr_singles": 3.51}]
+with patch.object(matcher.utr_scraper, 'search_players', return_value=annabelle_cand), \
+     patch.object(matcher.utr_scraper, 'get_player_matches', return_value=[]):
+    res = matcher.find_utr_profile(annabelle)
+assert res is not None and res["utr_id"] == "4925193", "Exact identity pair should be accepted"
+print("  Exact identity pair accepted: PASSED")
+
+good_only_player = {"usta_id": "RATING_GOOD_ONLY", "name": "Rating Test",
+                    "city": "Austin", "state": "TX", "wtn_singles": 34.0}
 good = [{"utr_id": "UTR_GOOD", "name": "Rating Test", "city": "Austin", "state": "TX",
          "utr_singles": 3.4}]
 with patch.object(matcher.utr_scraper, 'search_players', return_value=good), \
      patch.object(matcher.utr_scraper, 'get_player_matches', return_value=[]):
-    res = matcher.find_utr_profile(usta_rating)
+    res = matcher.find_utr_profile(good_only_player, ignore_cache=True)
 assert res is not None and res["utr_id"] == "UTR_GOOD"
 print("  Plausible WTN/UTR pair accepted: PASSED")
+print("  PASSED")
+
+# 7. Cached mapping validation (0 rating / implausible WTN-UTR / manual override)
+print("\n[7/7] Testing cached mapping validation...")
+from scripts.db import save_mapping, get_mapping, save_utr_player_profile
+
+# Cached mapping to a 0-rating profile must be invalidated and dropped
+save_mapping("CACHE_ZERO", "UTR_ZERO", "golden", 1.0)
+save_utr_player_profile("UTR_ZERO", "Zhenghao Wu", city="Irvine", state="CA",
+                        utr_singles=0.0, utr_doubles=None)
+zero_player = {"usta_id": "CACHE_ZERO", "name": "Kelly Zheng", "city": "San Diego",
+               "state": "CA", "wtn_singles": 22.9}
+with patch.object(matcher.utr_scraper, 'search_players', return_value=[]), \
+     patch.object(matcher.utr_scraper, 'get_player_matches', return_value=[]):
+    res = matcher.find_utr_profile(zero_player)
+assert res is None, "0-rating cached mapping should be ignored"
+assert get_mapping("CACHE_ZERO") is None, "Invalid cached mapping should be deleted"
+print("  0-rating cache invalidated: PASSED")
+
+# Cached profile for a different person (even if rated) is invalidated by name
+save_mapping("CACHE_BAD", "UTR_BAD_CACHE", "golden", 1.0)
+save_utr_player_profile("UTR_BAD_CACHE", "Thomas Carlisle", city="Rancho Palos Verdes",
+                        state="CA", utr_singles=1.42, utr_doubles=1.0)
+bad_player = {"usta_id": "CACHE_BAD", "name": "Auristella Carlisle",
+              "city": "Rancho Palos Verdes", "state": "CA", "wtn_singles": 23.53}
+with patch.object(matcher.utr_scraper, 'search_players', return_value=[]), \
+     patch.object(matcher.utr_scraper, 'get_player_matches', return_value=[]):
+    res = matcher.find_utr_profile(bad_player)
+assert res is None
+assert get_mapping("CACHE_BAD") is None
+print("  Wrong-person cache invalidated: PASSED")
+
+# Same-name cached mapping is kept even with an implausible rating (no hard reject)
+save_mapping("CACHE_DUP", "UTR_DUP", "golden", 1.0)
+save_utr_player_profile("UTR_DUP", "Kelly Zheng", city="Irvine", state="CA",
+                        utr_singles=6.5, utr_doubles=None)
+dup_player = {"usta_id": "CACHE_DUP", "name": "Kelly Zheng", "city": "San Diego",
+              "state": "CA", "wtn_singles": 34.0}
+with patch.object(matcher.utr_scraper, 'search_players', return_value=[]) as ms:
+    res = matcher.find_utr_profile(dup_player)
+assert res is not None and res["utr_id"] == "UTR_DUP"
+ms.assert_not_called()
+print("  Same-name cache kept despite rating gap: PASSED")
+
+# Exact name + same city/state is kept even when the rating is a poor fit (Annabelle)
+save_mapping("CACHE_STRONG", "UTR_STRONG", "golden", 1.0)
+save_utr_player_profile("UTR_STRONG", "Annabelle Gramm", city="San Diego", state="CA",
+                        utr_singles=3.51, utr_doubles=3.17)
+strong_player = {"usta_id": "CACHE_STRONG", "name": "Annabelle Gramm", "city": "San Diego",
+                 "state": "CA", "wtn_singles": 26.8}
+with patch.object(matcher.utr_scraper, 'search_players', return_value=[]) as ms:
+    res = matcher.find_utr_profile(strong_player)
+assert res is not None and res["utr_id"] == "UTR_STRONG"
+ms.assert_not_called()
+print("  Exact-identity cache kept despite rating gap: PASSED")
+
+# A compatible cached mapping is still trusted (no search performed)
+save_mapping("CACHE_OK", "UTR_OK_CACHE", "golden", 1.0)
+save_utr_player_profile("UTR_OK_CACHE", "Kelly Zheng", city="San Diego", state="CA",
+                        utr_singles=4.8, utr_doubles=None)
+ok_player = {"usta_id": "CACHE_OK", "name": "Kelly Zheng", "city": "San Diego",
+             "state": "CA", "wtn_singles": 30.0}
+with patch.object(matcher.utr_scraper, 'search_players', return_value=[]) as ms:
+    res = matcher.find_utr_profile(ok_player)
+assert res is not None and res["utr_id"] == "UTR_OK_CACHE"
+ms.assert_not_called()
+print("  Compatible cache trusted: PASSED")
+
+# A manual correction is always trusted, even with a 0 rating
+save_mapping("CACHE_MANUAL", "UTR_MANUAL", "manual_correct", 1.0)
+save_utr_player_profile("UTR_MANUAL", "Someone", utr_singles=0.0, utr_doubles=None)
+manual_player = {"usta_id": "CACHE_MANUAL", "name": "Kelly Zheng", "city": "San Diego",
+                 "state": "CA", "wtn_singles": 22.9}
+with patch.object(matcher.utr_scraper, 'search_players', return_value=[]):
+    res = matcher.find_utr_profile(manual_player)
+assert res is not None and res["utr_id"] == "UTR_MANUAL"
+print("  Manual correction trusted: PASSED")
 print("  PASSED")
 
 # Cleanup test DB
