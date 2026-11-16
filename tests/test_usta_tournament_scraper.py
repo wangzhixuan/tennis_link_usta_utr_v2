@@ -10,7 +10,7 @@ print("=" * 60)
 
 # 1. Class instantiation and GUID extraction
 print("\n[1/5] Testing GUID extraction...")
-from scripts.usta_scraper import USTAScraper
+from scripts.service.usta_scraper import USTAScraper
 scraper = USTAScraper()
 
 guid = scraper.extract_guid("D6F0B896-6620-4052-B6C4-3ABBAE1C5A8B")
@@ -52,7 +52,7 @@ print("  PASSED")
 
 # 3. Test division filtering
 print("\n[3/5] Testing division/event filtering...")
-from scripts.usta_scraper import USTAScraper
+from scripts.service.usta_scraper import USTAScraper
 events_path = os.path.join(os.path.dirname(__file__), "..", "usta_tournament_full.json")
 if os.path.exists(events_path):
     with open(events_path) as f:

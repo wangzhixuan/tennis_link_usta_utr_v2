@@ -28,13 +28,22 @@ batch_fetch.py         Headless batch refresh of USTA + UTR caches
 monitor.py             Progress monitor for batch_fetch
 launch_batch.py        Detached launcher for batch_fetch
 scripts/
-  config.py            .env-driven configuration
-  db.py                SQLite schema + cache accessors
-  matcher.py           USTA -> UTR matching heuristics + golden mapping loader
-  usta_scraper.py      USTA TennisLink scraper (+ playhistory match API)
-  utr_scraper.py       UTR API scraper (JWT-first, no-JWT fallback)
-  bootstrap.py         Seed/expand the USTA<->UTR mapping DB from one known pair
-tests/test_*.py        Standalone (script-style) tests, run directly
+  service/               Modules used by the web app / CLI runtime
+    config.py            .env-driven configuration
+    db.py                SQLite schema + cache accessors
+    matcher.py           USTA -> UTR matching heuristics + golden mapping loader
+    usta_scraper.py      USTA TennisLink scraper (+ playhistory match API)
+    utr_scraper.py       UTR API scraper (JWT-first, no-JWT fallback)
+    bootstrap.py         Seed/expand the USTA<->UTR mapping DB from one known pair
+    render.py            Results-table HTML/formatting helpers
+    tournament_finder.py USTA tournament search + event details
+    event_runner.py      Full enrichment pipeline for one event (Streamlit-free)
+  maintenance/           Debug / cleanup / one-time jobs (not imported by the app)
+    check_zero_utr.py    Re-check players stuck at 0.00 UTR
+    refresh_high_utr.py  Upgrade integer UTRs to precise decimals
+    import_reports.py    Import existing data/tournaments/*.tsv into history
+    merge_history.py     De-duplicate checked_events rows
+tests/test_*.py          Standalone (script-style) tests, run directly
 ```
 
 ## Prerequisites
@@ -99,7 +108,7 @@ GOLDEN_MAPPING_PATH=            # default: <parent>/Tennis/data/usta_to_utr_id_m
 The SQLite DB is created **automatically** on first import, so you can sanity-check now:
 
 ```sh
-python -c "from scripts import db; db.init_db(); print('DB ready:', db.DB_PATH)"
+python -c "from scripts.service import db; db.init_db(); print('DB ready:', db.DB_PATH)"
 ```
 
 ## Running
@@ -112,22 +121,52 @@ streamlit run app.py --server.port 8501
 
 In the browser:
 
-1. **Check Login Status** → log in to USTA/UTR once (the first time, log in manually —
+1. **Check Login Status** (sidebar) → log in to USTA/UTR once (the first time, log in manually —
    a browser window opens and stays logged in for later sessions).
-2. Paste a tournament URL or GUID (e.g. `2506261054211502`).
-3. Pick a division, then **Run Tournament** to fill the table.
+2. Open the **🎾 Tournament Players** tab and paste a tournament URL or GUID
+   (e.g. `2506261054211502`).
+3. Pick a division, then click **Run**.
    Detailed USTA profiles (WTN/rankings) are refreshed for the players in the selected
    event, except those already pulled earlier the same day (reused from cache); enable
    *Skip detailed profiles* to use cached values only.
 4. Use **Report Wrong Mapping** to fix any bad USTA→UTR links.
 5. **Refresh All** re-fetches USTA/UTR data only for players updated before today.
 
+The sidebar is limited to global items (login status and the mapping DB count); tournament
+settings and run options live inside the **🎾 Tournament Players** tab.
+
 The results table (and TSV/Excel export) includes each player's tournament **Status**
 (`Accepted`, `Alternate`, or `Withdrawn`), derived from USTA's registration entry status.
 
-The main area is split into three tabs: **📖 User Guide** (default), **🎾 Tournament Players**
-(the results table), and **🧩 Bootstrap Pairs** (auto-selected when the mapping DB has fewer
-than `BOOTSTRAP_MIN_PLAYERS` players).
+The main area is split into four tabs: **📖 User Guide** (default), **🎾 Tournament Players**
+(the results table), **🔎 Tournament Finder** (multi-level tournament search), and
+**🧩 Bootstrap Pairs** (auto-selected when the mapping DB has fewer than
+`BOOTSTRAP_MIN_PLAYERS` players).
+
+### Tournament Finder
+
+The **🔎 Tournament Finder** tab searches USTA junior tournaments around a ZIP, with a
+**configurable date range** and a **separate radius for every level** (Level 1–7; Open/Closed
+separate). It runs one USTA search per included level, merges and de-duplicates the results,
+and lists each tournament — sorted by start date, then level, then distance — showing name,
+dates, level, entry deadline and location without opening the row. Events are listed
+alphabetically.
+
+Tournament rows use a distinct color per level, and a distance chip whose color goes from
+**green (near) to red (far)** on a log-distance scale.
+
+Each event under a tournament has a checkbox and a tooltip showing **Draw type**,
+**Draw limit**, **Registrations closed**, plus **Surface** (when not "Outdoor Hard") and
+**Player selection** (when not "Top-down by ranking"). Select any number of events and
+click **Run selected**; each event goes through the full pipeline and appears in its own
+results tab, using the same results panel as Tournament Players (pinned `#`, sort controls,
+TSV/Excel downloads, and **Report Wrong Mapping**).
+
+The search configuration (location, dates, per-level radii) is collapsed into a
+**Search configuration** expander once results exist, keeping the page compact.
+
+Search filters are limited to location + per-level radius for now (no age/gender/WTN).
+Location is geocoded with OpenStreetMap Nominatim.
 
 ### CLI (single tournament)
 
@@ -148,6 +187,17 @@ python monitor.py        # in a second terminal to watch progress
 ```
 
 `launch_batch.py` launches it detached from Windows Explorer / a terminal.
+
+### Maintenance jobs (one-off / debug)
+
+These are not imported by the app; run them from the repo root:
+
+```sh
+python -m scripts.maintenance.import_reports  [--dry-run]   # import existing TSVs into history
+python -m scripts.maintenance.merge_history   [--dry-run]   # collapse duplicate history rows
+python -m scripts.maintenance.check_zero_utr  [--dry-run]   # re-check players stuck at UTR 0.00
+python -m scripts.maintenance.refresh_high_utr              # upgrade integer UTRs to decimals
+```
 
 ## Bootstrapping the mapping DB (fresh clone)
 
@@ -171,7 +221,7 @@ Same engine from the CLI, without the UI. `--reset` wipes the target DB first so
 (it refuses to wipe the default DB unless `--force`):
 
 ```sh
-python -m scripts.bootstrap --usta <USTA_ID> --utr <UTR_ID> --db %TEMP%\bootstrap_test.db --reset --max-players 20
+python -m scripts.service.bootstrap --usta <USTA_ID> --utr <UTR_ID> --db %TEMP%\bootstrap_test.db --reset --max-players 20
 ```
 
 (`--max-players` includes the seed pair, so `20` collects the seed + up to 19 discovered pairs —
@@ -194,6 +244,10 @@ python tests/test_usta_profile_rankings.py   # USTA profile/WTN/ranking fetch + 
 python tests/test_utr_api_live.py            # live UTR API + response edge cases
 python tests/test_utr_id_recovery.py         # auto-recovery when a UTR ID changes/disappears
 python tests/test_bootstrap.py               # mapping bootstrap + date/score correlation
+python tests/test_event_runner.py            # single-event pipeline + new-player detection
+python tests/test_run_division.py            # division run + history merge
+python tests/test_render_table.py            # results-table HTML, badges, ordering
+python tests/test_tournament_finder.py       # Finder search merge + event tooltips
 ```
 
 Note: tests use the project's SQLite DB and may recreate/clear it. Run them on a scratch

@@ -10,7 +10,7 @@ print("=" * 60)
 
 # 1. Class instantiation
 print("\n[1/5] Testing class instantiation...")
-from scripts.utr_scraper import UTRScraper
+from scripts.service.utr_scraper import UTRScraper
 scraper = UTRScraper(email="test@test.com", password="testpass")
 assert scraper.email == "test@test.com"
 assert scraper.password == "testpass"
@@ -115,7 +115,7 @@ mock_matches_response = {
 
 # get_player_matches uses the v4 API via requests.get and requires a JWT cookie
 scraper._jwt_cache = "test_jwt"
-with patch('scripts.utr_scraper.requests.get') as mock_get:
+with patch('scripts.service.utr_scraper.requests.get') as mock_get:
     resp = MagicMock()
     resp.status_code = 200
     resp.json.return_value = mock_matches_response

@@ -4,10 +4,10 @@ import argparse
 import logging
 import pandas as pd
 
-from scripts.config import UTR_USER, UTR_PASS
-from scripts.usta_scraper import USTAScraper
-from scripts.utr_scraper import UTRScraper
-from scripts.matcher import PlayerMatcher
+from scripts.service.config import UTR_USER, UTR_PASS
+from scripts.service.usta_scraper import USTAScraper
+from scripts.service.utr_scraper import UTRScraper
+from scripts.service.matcher import PlayerMatcher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

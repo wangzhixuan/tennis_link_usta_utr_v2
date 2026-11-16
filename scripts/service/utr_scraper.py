@@ -5,8 +5,8 @@ import time
 import logging
 import requests
 from typing import Optional
-from scripts.config import UTR_USER, UTR_PASS, PLAYWRIGHT_USER_DIR
-from scripts.db import save_utr_player_profile
+from scripts.service.config import UTR_USER, UTR_PASS, PLAYWRIGHT_USER_DIR
+from scripts.service.db import save_utr_player_profile
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

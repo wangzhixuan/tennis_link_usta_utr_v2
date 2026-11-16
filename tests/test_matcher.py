@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Use test database
-from scripts import db
+from scripts.service import db
 db.DB_PATH = os.path.join(tempfile.gettempdir(), "tennislink_test_p4.db")
 db.init_db()
 db.reset_all()  # start clean even if a previous run left data behind
@@ -17,8 +17,8 @@ print("=" * 60)
 
 # 1. Name normalization
 print("\n[1/7] Testing name normalization...")
-from scripts.matcher import PlayerMatcher
-from scripts.utr_scraper import UTRScraper
+from scripts.service.matcher import PlayerMatcher
+from scripts.service.utr_scraper import UTRScraper
 
 matcher = PlayerMatcher(UTRScraper())
 
@@ -64,7 +64,7 @@ print("  location_score: all cases passed")
 
 # 4. Full match flow - cache hit
 print("\n[4/7] Testing full match flow (with mocked UTR scraper)...")
-from scripts.db import save_mapping, get_mapping, save_usta_player_profile
+from scripts.service.db import save_mapping, get_mapping, save_usta_player_profile
 
 save_mapping("CACHE_TEST", "UTR_CACHED", "manual", 1.0)
 save_usta_player_profile("CACHE_TEST", "Test Player", city="Boston", state="MA", wtn_singles=10.0, rankings=[{"points": 5}])
@@ -157,8 +157,8 @@ with patch.object(matcher.utr_scraper, 'search_players', return_value=mock_low_c
 
 # 6. WTN <-> UTR rating plausibility
 print("\n[6/7] Testing WTN<->UTR rating compatibility...")
-# WTN 30 -> expected UTR ~4.97
-assert matcher.rating_compatibility(30, 5.0) > 0.9
+# WTN 30 -> expected UTR ~4.58
+assert matcher.rating_compatibility(30, 4.6) > 0.9
 # The real-world bad pairings: a low UTR for a weak WTN, or a high UTR for a very weak WTN
 assert matcher.rating_compatibility(25, 1.0) < 0.05
 assert matcher.rating_compatibility(34, 6.5) < 0.05
@@ -210,7 +210,7 @@ print("  PASSED")
 
 # 7. Cached mapping validation (0 rating / implausible WTN-UTR / manual override)
 print("\n[7/7] Testing cached mapping validation...")
-from scripts.db import save_mapping, get_mapping, save_utr_player_profile
+from scripts.service.db import save_mapping, get_mapping, save_utr_player_profile
 
 # Cached mapping to a 0-rating profile must be invalidated and dropped
 save_mapping("CACHE_ZERO", "UTR_ZERO", "golden", 1.0)
@@ -283,6 +283,26 @@ with patch.object(matcher.utr_scraper, 'search_players', return_value=[]):
     res = matcher.find_utr_profile(manual_player)
 assert res is not None and res["utr_id"] == "UTR_MANUAL"
 print("  Manual correction trusted: PASSED")
+
+# cache_only mode (used when UTR is rate-limited): cache hit without network,
+# and no-cache returns None without searching.
+save_mapping("CACHE_ONLY", "UTR_ONLY", "golden", 1.0)
+save_utr_player_profile("UTR_ONLY", "Only Player", city="San Diego", state="CA",
+                        utr_singles=5.0, utr_doubles=4.0)
+only_player = {"usta_id": "CACHE_ONLY", "name": "Only Player", "city": "San Diego",
+               "state": "CA", "wtn_singles": 30.0}
+with patch.object(matcher.utr_scraper, 'search_players') as ms:
+    res = matcher.find_utr_profile(only_player, cache_only=True)
+assert res is not None and res["utr_id"] == "UTR_ONLY"
+ms.assert_not_called()
+
+no_cache_player = {"usta_id": "NO_CACHE_ONLY", "name": "Nobody Here",
+                   "city": "San Diego", "state": "CA", "wtn_singles": 30.0}
+with patch.object(matcher.utr_scraper, 'search_players') as ms:
+    res = matcher.find_utr_profile(no_cache_player, cache_only=True)
+assert res is None
+ms.assert_not_called()
+print("  cache_only uses cache / skips network: PASSED")
 print("  PASSED")
 
 # Cleanup test DB

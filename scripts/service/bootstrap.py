@@ -9,7 +9,7 @@ couple of expansion layers until it has built a small starter DB (~20-30 players
 Both the USTA and UTR sessions must be logged in first.
 
 CLI usage (manual testing on a scratch DB):
-    python -m scripts.bootstrap --usta 2018671404 --utr 3639763 \
+    python -m scripts.service.bootstrap --usta 2018671404 --utr 3639763 \
         --db %TEMP%\\bootstrap_test.db --reset
 """
 import os
@@ -18,16 +18,16 @@ import time
 import argparse
 import logging
 
-from scripts.config import (
+from scripts.service.config import (
     BOOTSTRAP_MAX_PLAYERS,
     BOOTSTRAP_MAX_DEPTH,
     DB_PATH as DEFAULT_DB_PATH,
 )
-from scripts import db
-from scripts.db import save_mapping, save_usta_player_profile, save_utr_player_profile
-from scripts.usta_scraper import USTAScraper
-from scripts.utr_scraper import UTRScraper
-from scripts.matcher import PlayerMatcher
+from scripts.service import db
+from scripts.service.db import save_mapping, save_usta_player_profile, save_utr_player_profile
+from scripts.service.usta_scraper import USTAScraper
+from scripts.service.utr_scraper import UTRScraper
+from scripts.service.matcher import PlayerMatcher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

@@ -6,8 +6,8 @@ import logging
 import requests
 from typing import Optional
 from playwright.sync_api import sync_playwright
-from scripts.db import save_usta_player_profile
-from scripts.utr_scraper import PLAYWRIGHT_USER_DIR
+from scripts.service.db import save_usta_player_profile
+from scripts.service.utr_scraper import PLAYWRIGHT_USER_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -501,12 +501,15 @@ class USTAScraper:
         return matched if matched else None
 
     def scrape_tournament(self, url_or_id: str, target_division: str = None,
-                           headless: bool = True) -> list:
+                           headless: bool = True, target_event_ids: set = None) -> list:
         guid = self.extract_guid(url_or_id)
         logger.info(f"Fetching tournament GUID: {guid}")
 
         events = self.fetch_events(guid)
-        target_event_ids = self.build_event_filter(events, target_division)
+        if target_event_ids:
+            target_event_ids = {str(e) for e in target_event_ids}
+        else:
+            target_event_ids = self.build_event_filter(events, target_division)
 
         # Try standard public API first
         participants = self.fetch_participants(guid)

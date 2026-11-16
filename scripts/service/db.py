@@ -1,7 +1,8 @@
 import sqlite3
 import json
+import re
 import datetime
-from scripts.config import DB_PATH
+from scripts.service.config import DB_PATH
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -133,6 +134,25 @@ def init_db():
                 last_updated TEXT NOT NULL
             )
         """)
+
+        # Checked events/rosters (for "previously checked" + new-player detection)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS checked_events (
+                event_key TEXT PRIMARY KEY,
+                tournament_id TEXT NOT NULL,
+                event_id TEXT,
+                tournament_name TEXT,
+                event_label TEXT,
+                level TEXT,
+                event_date TEXT,
+                division_json TEXT,
+                last_checked TEXT NOT NULL,
+                player_count INTEGER,
+                roster_json TEXT
+            )
+        """)
+        if not _column_exists(cursor, "checked_events", "event_date"):
+            cursor.execute("ALTER TABLE checked_events ADD COLUMN event_date TEXT")
 
         conn.commit()
 
@@ -331,6 +351,7 @@ def get_all_mappings() -> list:
 def reset_all():
     """Delete every row from every table. Intended for scratch/bootstrap DBs only."""
     tables = (
+        "checked_events",
         "player_mappings",
         "usta_player_rankings",
         "usta_player_history",
@@ -343,6 +364,104 @@ def reset_all():
             conn.execute(f"DELETE FROM {t}")
         conn.commit()
 
+
+# ── Checked events / rosters ──
+
+def normalize_event_label(label):
+    """Normalize an event label for matching (ignore Singles/Doubles/Team prefixes)."""
+    s = (label or "").lower()
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    words = [w for w in s.split() if w not in ("singles", "doubles", "team")]
+    return " ".join(words)
+
+
+def delete_checked_event(event_key):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM checked_events WHERE event_key = ?", (event_key,))
+        conn.commit()
+
+
+def save_checked_event(event_key, tournament_id, event_id, tournament_name,
+                       event_label, level, division, roster, event_date=None,
+                       checked_at=None):
+    """Upsert a checked event and its current roster (for later new-player detection)."""
+    now = checked_at or datetime.datetime.now().isoformat()
+    division_json = json.dumps(division or {})
+    roster_json = json.dumps(roster or [])
+
+    # If this is a division-level save, reuse an existing event-level row for the
+    # same tournament + event label so history stays one row per event.
+    if event_id is None:
+        with get_connection() as conn:
+            existing = conn.execute(
+                "SELECT event_key, event_id, event_label FROM checked_events "
+                "WHERE tournament_id = ?", (tournament_id,)
+            ).fetchall()
+        target = normalize_event_label(event_label)
+        for row in existing:
+            if normalize_event_label(row["event_label"]) == target:
+                event_key = row["event_key"]
+                event_id = row["event_id"]
+                break
+
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO checked_events (
+                event_key, tournament_id, event_id, tournament_name, event_label,
+                level, event_date, division_json, last_checked, player_count, roster_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_key) DO UPDATE SET
+                tournament_id=excluded.tournament_id, event_id=excluded.event_id,
+                tournament_name=excluded.tournament_name, event_label=excluded.event_label,
+                level=excluded.level, event_date=excluded.event_date,
+                division_json=COALESCE(NULLIF(excluded.division_json, '{}'), division_json),
+                last_checked=excluded.last_checked, player_count=excluded.player_count,
+                roster_json=excluded.roster_json
+        """, (event_key, tournament_id, event_id, tournament_name, event_label, level,
+              event_date, division_json, now, len(roster or []), roster_json))
+        conn.commit()
+
+
+def _checked_row_to_dict(row):
+    d = dict(row)
+    try:
+        d["division"] = json.loads(d.pop("division_json") or "{}")
+    except Exception:
+        d["division"] = {}
+    try:
+        d["roster"] = json.loads(d.pop("roster_json") or "[]")
+    except Exception:
+        d["roster"] = []
+    return d
+
+
+def get_checked_event(event_key):
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM checked_events WHERE event_key = ?", (event_key,)
+        ).fetchone()
+    return _checked_row_to_dict(row) if row else None
+
+
+def get_checked_event_for_label(tournament_id, event_label):
+    """Find a checked event for a tournament by normalized event label."""
+    target = normalize_event_label(event_label)
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM checked_events WHERE tournament_id = ?", (tournament_id,)
+        ).fetchall()
+    for row in rows:
+        if normalize_event_label(row["event_label"]) == target:
+            return _checked_row_to_dict(row)
+    return None
+
+
+def get_checked_events():
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM checked_events ORDER BY last_checked DESC"
+        ).fetchall()
+    return [_checked_row_to_dict(r) for r in rows]
 
 
 init_db()

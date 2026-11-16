@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Use a scratch database so the real tennislink.db isn't touched
-from scripts import db
+from scripts.service import db
 db.DB_PATH = os.path.join(tempfile.gettempdir(), "tennislink_test_profiles.db")
 db.init_db()
 db.reset_all()
@@ -75,8 +75,8 @@ RANKINGS_FIXTURE = {
 
 # 1. Test _parse_and_save_profile
 print("\n[1/5] Testing _parse_and_save_profile with fixture data...")
-from scripts.usta_scraper import USTAScraper
-from scripts.db import get_usta_player_profile, get_usta_rankings
+from scripts.service.usta_scraper import USTAScraper
+from scripts.service.db import get_usta_player_profile, get_usta_rankings
 
 scraper = USTAScraper()
 api_data = {"info": PLAYER_INFO_FIXTURE, "rankings": RANKINGS_FIXTURE}

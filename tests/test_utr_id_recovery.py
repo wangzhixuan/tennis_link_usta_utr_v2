@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Use a scratch database for testing
-from scripts import db
+from scripts.service import db
 db.DB_PATH = os.path.join(tempfile.gettempdir(), "tennislink_test_p8.db")
 db.init_db()
 db.reset_all()
@@ -15,9 +15,9 @@ print("=" * 60)
 print("UTR ID auto-recovery: changed / merged / deleted IDs")
 print("=" * 60)
 
-from scripts.utr_scraper import UTRScraper
-from scripts.matcher import PlayerMatcher
-from scripts.db import (
+from scripts.service.utr_scraper import UTRScraper
+from scripts.service.matcher import PlayerMatcher
+from scripts.service.db import (
     save_mapping, get_mapping, delete_mapping, save_utr_player_profile,
 )
 

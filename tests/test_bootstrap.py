@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Scratch DB so the real tennislink.db is untouched
-from scripts import db
+from scripts.service import db
 db.DB_PATH = os.path.join(tempfile.gettempdir(), "tennislink_test_bootstrap.db")
 db.init_db()
 db.reset_all()
@@ -15,11 +15,11 @@ print("=" * 60)
 print("Bootstrap: mapping DB seeding + match-history correlation")
 print("=" * 60)
 
-from scripts.matcher import PlayerMatcher
-from scripts.utr_scraper import UTRScraper
-from scripts.usta_scraper import USTAScraper
-from scripts.bootstrap import bootstrap_from_seed
-from scripts.db import get_mapping, count_mappings
+from scripts.service.matcher import PlayerMatcher
+from scripts.service.utr_scraper import UTRScraper
+from scripts.service.usta_scraper import USTAScraper
+from scripts.service.bootstrap import bootstrap_from_seed
+from scripts.service.db import get_mapping, count_mappings
 
 
 # ── Fakes ──────────────────────────────────────────────────────────────
@@ -207,7 +207,7 @@ v4_resp.json.return_value = {
         }]}],
     }]
 }
-with patch("scripts.utr_scraper.requests.get", return_value=v4_resp):
+with patch("scripts.service.utr_scraper.requests.get", return_value=v4_resp):
     th = utr.get_player_match_history("1")
 assert th[0]["opponent_utr_id"] == "2"
 assert th[0]["score"] == "1-6 1-6", f"Expected owner-perspective score, got {th[0]['score']}"
@@ -222,7 +222,7 @@ print("  End-to-end correlation of synthetic payloads: PASSED")
 
 # 7. Scratch-DB schema creation (bootstrap --db / prepare_db)
 print("\n[7/7] Testing scratch-DB initialization (prepare_db)...")
-from scripts.bootstrap import prepare_db
+from scripts.service.bootstrap import prepare_db
 
 scratch = os.path.join(tempfile.gettempdir(), "tennislink_test_bootstrap_scratch.db")
 try:

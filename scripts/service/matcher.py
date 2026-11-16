@@ -6,10 +6,10 @@ import datetime
 import difflib
 import logging
 from typing import Optional
-from scripts.config import GOLDEN_MAPPING_PATH
-from scripts.db import (get_mapping, save_mapping, save_utr_cache,
+from scripts.service.config import GOLDEN_MAPPING_PATH
+from scripts.service.db import (get_mapping, save_mapping, save_utr_cache,
                         get_utr_player_profile, delete_mapping)
-from scripts.utr_scraper import UTRScraper
+from scripts.service.utr_scraper import UTRScraper
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -32,13 +32,14 @@ STATE_ABBREV = {
 
 NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 
-# Empirical WTN -> UTR relationship, fit from local mapping data (n≈1478):
-#   UTR ≈ 16.845 - 0.3956 * WTN, residual sd ≈ 0.96
-# WTN is lower-is-better, UTR higher-is-better. We use a slightly forgiving
-# residual sd and a Gaussian likelihood to sanity-check candidate pairs.
-WTN_UTR_INTERCEPT = 16.845
-WTN_UTR_SLOPE = -0.3956
-WTN_UTR_RESID_SD = 1.1
+# Empirical WTN -> UTR relationship. Refit on local mapped pairs whose WTN and UTR
+# were profiled within 7 days of each other (n=1414):
+#   UTR ≈ 15.3267 - 0.35825 * WTN, corr -0.921, residual sd ≈ 0.700
+# WTN is lower-is-better, UTR higher-is-better. A Gaussian likelihood is used as a
+# soft tie-breaker when ranking candidate pairs (never a hard reject).
+WTN_UTR_INTERCEPT = 15.3267
+WTN_UTR_SLOPE = -0.35825
+WTN_UTR_RESID_SD = 0.70
 # Rating compatibility is only a soft tie-breaker when ranking candidates. This
 # threshold is used by the UI to draw the "plausible band" in the WTN<->UTR chart.
 RATING_MIN_COMPATIBILITY = 0.05
@@ -154,6 +155,7 @@ class PlayerMatcher:
         ignore_cache: bool = False,
         exclude_utr_ids: set = None,
         validate_cached: bool = False,
+        cache_only: bool = False,
     ) -> Optional[dict]:
         """
         Finds the matching UTR profile for a given USTA player dict.
@@ -166,6 +168,7 @@ class PlayerMatcher:
         - ignore_cache: if True, skips local database cache to force re-search
         - exclude_utr_ids: set of UTR IDs to exclude (e.g. dead/changed 404 IDs)
         - validate_cached: if True, verifies cached UTR ID still exists on UTR Sports
+        - cache_only: if True, use only the local cache and never call UTR (rate-limited mode)
         """
         usta_id = usta_player["usta_id"]
         usta_name = usta_player["name"]
@@ -229,6 +232,10 @@ class PlayerMatcher:
                         "utr_singles": cached_profile.get("utr_singles") if cached_profile else None,
                         "utr_doubles": cached_profile.get("utr_doubles") if cached_profile else None,
                     }
+
+        if cache_only:
+            logger.info(f"Cache-only mode (UTR rate-limited): no cached mapping for {usta_name}")
+            return None
 
         # Level 2: Search UTR and Apply Name & Location matching
         candidates = self.utr_scraper.search_players(usta_name, city=hometown_city, state=hometown_state)

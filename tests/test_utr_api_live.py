@@ -18,8 +18,8 @@ print("=" * 60)
 print("UTR API (live): edge cases & resilience")
 print("=" * 60)
 
-from scripts.utr_scraper import UTRScraper, SEARCH_URL
-from scripts.db import init_db
+from scripts.service.utr_scraper import UTRScraper, SEARCH_URL
+from scripts.service.db import init_db
 
 init_db()
 
@@ -311,7 +311,7 @@ formats = [
 
 expected_counts = [1, 1, 2, 0, 0, 0]
 for (label, response_data), exp in zip(formats, expected_counts):
-    with patch('scripts.utr_scraper.requests.get') as mock_get:
+    with patch('scripts.service.utr_scraper.requests.get') as mock_get:
         resp = MagicMock()
         resp.status_code = 200
         resp.json.return_value = response_data
@@ -326,7 +326,7 @@ for (label, response_data), exp in zip(formats, expected_counts):
     print(f"  {label}: {len(matches)} opponents — PASSED")
 
 # Non-200 response returns []
-with patch('scripts.utr_scraper.requests.get') as mock_get:
+with patch('scripts.service.utr_scraper.requests.get') as mock_get:
     resp = MagicMock()
     resp.status_code = 500
     mock_get.return_value = resp
@@ -382,7 +382,7 @@ print("  PASSED")
 # ── 8. DB caching round-trip ──────────────────────────────────────────
 print("\n[8/8] DB caching round-trip...")
 
-from scripts.db import save_utr_player_profile, get_utr_player_profile, get_all_cache
+from scripts.service.db import save_utr_player_profile, get_utr_player_profile, get_all_cache
 
 save_utr_player_profile("UTR_LIVE_TEST", "Robert Jordan", city="Miami", state="FL", utr_singles=8.5, utr_doubles=7.2)
 cached = get_utr_player_profile("UTR_LIVE_TEST")
